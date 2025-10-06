@@ -1,0 +1,13 @@
+name: refresh
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 9 * * 1"   # Mondays 09:00 UTC (uncomment to enable schedule)
+
+jobs:
+  ok:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder
+        run: echo "Automation ready — we'll add ETL steps in Step 2."
