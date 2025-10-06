@@ -1,0 +1,7 @@
+pandas
+requests
+geopandas
+pyarrow
+duckdb
+streamlit
+sodapy
