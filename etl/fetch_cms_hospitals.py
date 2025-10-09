@@ -5,7 +5,8 @@
 #   data_clean/cms_hospital_info.csv
 # If the source is unavailable, writes empty placeholders (so the workflow keeps going).
 
-import os, json, traceback, pathlib, pandas as pd
+import os, json, traceback, pathlib
+import pandas as pd  # <-- keep this separate (important!)
 
 DOMAIN  = "data.cms.gov"
 DATASET = "xubh-q36u"          # Hospital General Information
@@ -73,4 +74,29 @@ def main():
         except Exception:
             print("ERROR: HTTP fallback failed:")
             traceback.print_exc()
-            return placeholder("Unable to fetch CMS hospital info via b
+            return placeholder("Unable to fetch CMS hospital info via both methods.")
+
+    if df is None or df.empty:
+        return placeholder("CMS hospital info returned no rows")
+
+    # Raw snapshot
+    df_raw = df.copy()
+
+    # Light clean: standardize CCN column name
+    df_clean = df.copy()
+    if "provider_id" in df_clean.columns and "ccn" not in df_clean.columns:
+        df_clean = df_clean.rename(columns={"provider_id":"ccn"})
+
+    print(f"OK: hospital rows = {len(df_clean):,}")
+    print("INFO: columns:", list(df_clean.columns))
+
+    df_raw.to_csv(OUT_RAW, index=False)
+    df_clean.to_csv(OUT_CLEAN, index=False)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        print("FATAL: Uncaught exception in fetch_cms_hospitals.py")
+        traceback.print_exc()
+        placeholder("Unhandled exception (see trace)")
