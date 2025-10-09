@@ -5,63 +5,37 @@ on:
     - cron: "0 9 * * 1"          # Mondays 09:00 UTC
 
 permissions:
-  contents: write                # allow commits from the workflow
+  contents: write
 
 jobs:
   run-etl:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Print branch and path
+      - name: Show branch & tree
         run: |
-          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
-          pwd
-          ls -la
+          echo "Branch: $GITHUB_REF_NAME"
+          ls -R
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install deps (robust)
         run: |
           python -V
           python -m pip install --upgrade pip
+          # install from requirements, but don't fail the step if it has an issue
           pip install -r requirements.txt || true
-          # fallback ensures packages are present even if requirements.txt had issues
+          # ensure the key libs are present no matter what
           pip install pandas requests streamlit sodapy pyarrow duckdb
 
-      - name: List repo tree
+      - name: Verify ETL files exist
         run: |
-          echo "Repo tree:"
-          ls -R
-
-      - name: Run CMS outcomes
-        run: python etl/fetch_cms_outcomes.py
-
-      - name: Run CMS hospitals
-        run: python etl/fetch_cms_hospitals.py
-
-      - name: Run CDC county
-        run: python etl/fetch_cdc_stroke_county.py
-
-      - name: Run ACS uninsured
-        run: python etl/fetch_acs_uninsured.py
-
-      - name: Show outputs
-        run: |
-          echo "data_clean:"
-          ls -la data_clean || true
-          echo "data_raw:"
-          ls -la data_raw || true
-
-      - name: Commit artifacts
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add data_raw data_clean || true
-          git commit -m "Auto-refresh data" || echo "No changes to commit"
-          git push
+          test -f etl/fetch_cms_outcomes.py || (echo "Missing: etl/fetch_cms_outcomes.py" && exit 1)
+          test -f etl/fetch_cms_hospitals.py || (echo "Missing: etl/fetch_cms_hospitals.py" && exit 1)
+          test -f etl/fetch_cdc_stroke_county.py || (echo "Missing: etl/fetch_cdc_stroke_county.py" && exit 1)
+          test -f etl/fetch_acs_uninsured.py || (echo "Missing: etl/fetch_acs_uninsured.py" && exit 1)
