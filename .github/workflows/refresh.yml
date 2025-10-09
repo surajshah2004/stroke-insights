@@ -1,29 +1,67 @@
 name: refresh
 on:
-  workflow_dispatch: {}
+  workflow_dispatch: {}          # run manually
+  schedule:
+    - cron: "0 9 * * 1"          # Mondays 09:00 UTC
 
 permissions:
-  contents: write
+  contents: write                # allow commits from the workflow
 
 jobs:
-  smoke:
+  run-etl:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repo
+        uses: actions/checkout@v4
 
-      - name: Make sure folders exist
+      - name: Print branch and path
         run: |
-          mkdir -p data_clean
-          mkdir -p data_raw
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          pwd
+          ls -la
 
-      - name: Write a test file
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
         run: |
-          echo "smoke-test: $(date -u)" > data_clean/_smoke.txt
+          python -V
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          # fallback ensures packages are present even if requirements.txt had issues
+          pip install pandas requests streamlit sodapy pyarrow duckdb
+
+      - name: List repo tree
+        run: |
+          echo "Repo tree:"
+          ls -R
+
+      - name: Run CMS outcomes
+        run: python etl/fetch_cms_outcomes.py
+
+      - name: Run CMS hospitals
+        run: python etl/fetch_cms_hospitals.py
+
+      - name: Run CDC county
+        run: python etl/fetch_cdc_stroke_county.py
+
+      - name: Run ACS uninsured
+        run: python etl/fetch_acs_uninsured.py
+
+      - name: Show outputs
+        run: |
+          echo "data_clean:"
+          ls -la data_clean || true
+          echo "data_raw:"
+          ls -la data_raw || true
 
       - name: Commit artifacts
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add data_clean/_smoke.txt
-          git commit -m "Smoke test: write file" || echo "No changes to commit"
+          git add data_raw data_clean || true
+          git commit -m "Auto-refresh data" || echo "No changes to commit"
           git push
