@@ -1,35 +1,29 @@
 name: refresh
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: "0 9 * * 1"  # Mondays 09:00 UTC
+
+permissions:
+  contents: write
 
 jobs:
-  run-etl:
+  smoke:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps
+      - name: Make sure folders exist
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          mkdir -p data_clean
+          mkdir -p data_raw
 
-      - name: Run ETL
+      - name: Write a test file
         run: |
-          python etl/fetch_cms_outcomes.py
-          python etl/fetch_cms_hospitals.py
-          python etl/fetch_cdc_stroke_county.py
-          python etl/fetch_acs_uninsured.py
+          echo "smoke-test: $(date -u)" > data_clean/_smoke.txt
 
       - name: Commit artifacts
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add data_raw data_clean || true
-          git commit -m "Auto-refresh data" || echo "No changes to commit"
+          git add data_clean/_smoke.txt
+          git commit -m "Smoke test: write file" || echo "No changes to commit"
           git push
