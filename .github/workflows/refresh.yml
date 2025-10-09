@@ -73,5 +73,33 @@ jobs:
           echo "::endgroup::"
 
       - name: Smoke write (prove we can commit)
+        shell: bash
         run: |
-          date -u +"%Y-%m-%dT%H
+          printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > data_clean/_smoke_commit.txt
+
+      - name: Git status before commit
+        run: |
+          git status
+          git ls-files --others --exclude-standard
+
+      - name: Commit artifacts
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data_raw data_clean || true
+          git commit -m "Auto-refresh data" || echo "No changes to commit"
+          git push || echo "WARN: git push failed (likely branch protection/permissions)"
+
+      - name: Upload data_clean as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data_clean
+          path: data_clean
+
+      - name: Upload data_raw as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data_raw
+          path: data_raw
