@@ -1,5 +1,5 @@
 # etl/build_clean_tables.py
-# Robust joins that tolerate empty/placeholder CSVs from earlier ETL steps.
+# Writes analysis-ready tables and tolerates empty/missing inputs by creating header-only CSVs.
 
 import json
 import pathlib
@@ -10,10 +10,9 @@ DATA = pathlib.Path("data_clean")
 DATA.mkdir(exist_ok=True)
 
 def read_safe(filename: str):
-    """Return a DataFrame or None if file missing/empty/unreadable."""
     p = DATA / filename
     if not p.exists() or p.stat().st_size == 0:
-        print(f"INFO: {filename} missing or empty; treating as None")
+        print(f"INFO: {filename} missing/empty; treating as None")
         return None
     try:
         return pd.read_csv(p, dtype=str, low_memory=False)
@@ -27,51 +26,62 @@ def read_safe(filename: str):
 def num(x):
     return pd.to_numeric(x, errors="coerce")
 
+def write_header_only(path: pathlib.Path, columns):
+    df = pd.DataFrame(columns=columns)
+    df.to_csv(path, index=False)
+    print(f"INFO: wrote header-only {path.name} with columns {columns}")
+
 def build_hospital_profile():
     out = DATA / "hospital_profile.csv"
     o = read_safe("cms_stroke_outcomes.csv")
     h = read_safe("cms_hospital_info.csv")
 
-    if o is None or h is None:
-        print("INFO: Skipping hospital join (missing outcomes or hospital info). Writing empty output.")
-        pd.DataFrame().to_csv(out, index=False)
-        return
+    # default header set
+    default_cols = ["ccn","hospital_name","address","city","state","zip_code",
+                    "county_name","phone_number","lat","lon","mortality_30d","readmit_30d"]
 
-    # Normalize CCN column names if needed
+    if o is None or h is None:
+        print("INFO: Skipping hospital join (missing outcomes or hospital info).")
+        return write_header_only(out, default_cols)
+
+    # Normalize CCN
     if "ccn" not in o.columns and "provider_id" in o.columns:
         o = o.rename(columns={"provider_id": "ccn"})
     if "ccn" not in h.columns and "provider_id" in h.columns:
         h = h.rename(columns={"provider_id": "ccn"})
 
-    # Keep just ischemic stroke measures (mortality/readmission)
-    if "measure_id" in o.columns:
-        keep_ids = {"MORT_30_STK": "mortality_30d", "READM_30_STK": "readmit_30d"}
-        o = o[o["measure_id"].isin(keep_ids)].copy()
-        if "end_date" in o.columns:
-            o["end_date_dt"] = pd.to_datetime(o["end_date"], errors="coerce")
-            o = (
-                o.sort_values(["ccn", "measure_id", "end_date_dt"])
-                 .drop_duplicates(["ccn", "measure_id"], keep="last")
-            )
-        o["score_num"] = num(o.get("score"))
-        wide = (
-            o.pivot_table(index="ccn", columns="measure_id", values="score_num", aggfunc="first")
-             .rename(columns=keep_ids)
-             .reset_index()
-        )
-    else:
-        # If schema changed and measure_id isn't present, pass through basic hospital info
-        print("WARN: outcomes missing 'measure_id'; writing hospital info without outcomes.")
-        h.to_csv(out, index=False)
-        return
+    # If outcomes schema lacks measure_id, just output hospital info headers
+    if "measure_id" not in o.columns:
+        print("WARN: outcomes missing 'measure_id'; writing hospital info headers only.")
+        return write_header_only(out, default_cols)
 
-    # Ensure expected hospital columns exist
+    keep_ids = {"MORT_30_STK": "mortality_30d", "READM_30_STK": "readmit_30d"}
+    o = o[o["measure_id"].isin(keep_ids)].copy()
+
+    if o.empty:
+        print("INFO: No stroke outcome rows. Writing header-only hospital_profile.")
+        return write_header_only(out, default_cols)
+
+    if "end_date" in o.columns:
+        o["end_date_dt"] = pd.to_datetime(o["end_date"], errors="coerce")
+        o = (
+            o.sort_values(["ccn", "measure_id", "end_date_dt"])
+             .drop_duplicates(["ccn", "measure_id"], keep="last")
+        )
+
+    o["score_num"] = num(o.get("score"))
+    wide = (
+        o.pivot_table(index="ccn", columns="measure_id", values="score_num", aggfunc="first")
+         .rename(columns=keep_ids)
+         .reset_index()
+    )
+
     h2 = h.copy()
-    for c in ["hospital_name", "address", "city", "state", "zip_code", "county_name", "phone_number"]:
+    for c in ["hospital_name","address","city","state","zip_code","county_name","phone_number"]:
         if c not in h2.columns:
             h2[c] = pd.NA
 
-    # Extract lat/lon from 'location' if present
+    # lat/lon from 'location'
     h2["lat"], h2["lon"] = pd.NA, pd.NA
     if "location" in h2.columns:
         def latlon(v):
@@ -81,7 +91,6 @@ def build_hospital_profile():
                     if "latitude" in v and "longitude" in v:
                         return float(v["latitude"]), float(v["longitude"])
                     if "coordinates" in v and isinstance(v["coordinates"], (list, tuple)) and len(v["coordinates"]) == 2:
-                        # Socrata sometimes stores [lon, lat]
                         return float(v["coordinates"][1]), float(v["coordinates"][0])
             except Exception:
                 pass
@@ -95,22 +104,29 @@ def build_hospital_profile():
         if c in prof.columns:
             prof[c] = num(prof[c])
 
+    # Ensure all default columns exist (order them nicely)
+    for c in default_cols:
+        if c not in prof.columns:
+            prof[c] = pd.NA
+    prof = prof[default_cols]
+
     prof.to_csv(out, index=False)
-    print(f"OK: wrote {len(prof):,} rows to data_clean/hospital_profile.csv")
+    print(f"OK: wrote {len(prof):,} rows to {out}")
 
 def build_county_profile():
     out = DATA / "county_profile.csv"
     cdc = read_safe("cdc_stroke_mortality_county.csv")
     acs = read_safe("acs_uninsured_county.csv")
 
+    default_cols = ["fips","state","county","state_name","county_name","death_rate","pct_uninsured"]
+
     if cdc is None:
-        print("INFO: Skipping county join (missing CDC file). Writing empty output.")
-        pd.DataFrame().to_csv(out, index=False)
-        return
+        print("INFO: Skipping county join (missing CDC file).")
+        return write_header_only(out, default_cols)
 
     df = cdc.copy()
 
-    # Build FIPS from available columns
+    # Build FIPS
     fips = None
     if "fips" in df.columns:
         fips = df["fips"].astype(str).str.zfill(5)
@@ -120,18 +136,24 @@ def build_county_profile():
         fips = df["state"].astype(str).str.zfill(2) + df["county"].astype(str).str.zfill(3)
 
     if fips is None:
-        print("WARN: Could not construct FIPS; saving CDC pass-through.")
-        df.to_csv(out, index=False)
-        return
+        print("WARN: Could not construct FIPS; writing header-only county_profile.")
+        return write_header_only(out, default_cols)
 
     df["fips"] = fips
+
     if acs is not None and "fips" in acs.columns:
         df = df.merge(acs[["fips", "pct_uninsured"]], on="fips", how="left")
     else:
         df["pct_uninsured"] = pd.NA
 
+    # Try to keep common columns if present
+    cols = [c for c in default_cols if c in df.columns]
+    if "fips" not in cols:
+        cols = ["fips"] + cols
+    df = df[cols]
+
     df.to_csv(out, index=False)
-    print(f"OK: wrote {len(df):,} rows to data_clean/county_profile.csv")
+    print(f"OK: wrote {len(df):,} rows to {out}")
 
 if __name__ == "__main__":
     build_hospital_profile()
