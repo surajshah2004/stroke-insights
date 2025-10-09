@@ -1,22 +1,14 @@
-# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Packaging
 *.egg-info/
 dist/
 build/
-
-# Virtual envs
 .venv/
 venv/
 env/
-
-# Streamlit cache
 .streamlit/
 
-# Data: ignore everything but keep CSV/Parquet and .gitkeep
 data_raw/*
 !data_raw/*.csv
 !data_raw/*.parquet
