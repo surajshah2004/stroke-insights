@@ -1,22 +1,27 @@
 name: refresh
 on:
-  workflow_dispatch: {}          # run manually
+  workflow_dispatch: {}
   schedule:
-    - cron: "0 9 * * 1"          # Mondays 09:00 UTC
+    - cron: "0 9 * * 1"  # Mondays 09:00 UTC
 
 permissions:
-  contents: write                # allow commits from the workflow
+  contents: write
 
 jobs:
   run-etl:
     runs-on: ubuntu-latest
+    env:
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional
+
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
 
       - name: Show branch & tree
         run: |
-          echo "Branch: $GITHUB_REF_NAME"
+          echo "Branch => $GITHUB_REF_NAME"
+          ls -la
+          echo "--- repo tree ---"
           ls -R
 
       - name: Setup Python
@@ -24,22 +29,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (robust)
+      - name: Install deps
         run: |
           python -V
           python -m pip install --upgrade pip
-          # install from requirements, but don't fail if requirements has an issue
           pip install -r requirements.txt || true
-          # ensure the key libs are present no matter what
           pip install pandas requests streamlit sodapy pyarrow duckdb
 
-      - name: Verify ETL files exist
+      - name: Ensure folders exist
         run: |
-          for f in etl/fetch_cms_outcomes.py etl/fetch_cms_hospitals.py etl/fetch_cdc_stroke_county.py etl/fetch_acs_uninsured.py; do
-            test -f "$f" || (echo "Missing: $f" && exit 1)
-          done
+          mkdir -p data_clean data_raw
+          ls -la data_clean || true
+          ls -la data_raw || true
 
-      # ---- ETL steps (run individually so failures are obvious) ----
       - name: Run CMS outcomes
         run: python etl/fetch_cms_outcomes.py
 
@@ -52,11 +54,24 @@ jobs:
       - name: Run ACS uninsured
         run: python etl/fetch_acs_uninsured.py
 
-      # ---- Build analysis-ready tables (only if file exists) ----
       - name: Build clean tables
-        if: ${{ hashFiles('etl/build_clean_tables.py') != '' }}
         run: python etl/build_clean_tables.py
 
       - name: List outputs
         run: |
-          echo "::group::data_clean"_
+          echo "::group::data_clean"
+          ls -la data_clean || true
+          for f in data_clean/*.csv; do
+            [ -f "$f" ] && echo "--- $(basename "$f") (first 5 lines) ---" && head -n 5 "$f";
+          done
+          echo "::endgroup::"
+          echo "::group::data_raw"
+          ls -la data_raw || true
+          for f in data_raw/*.csv; do
+            [ -f "$f" ] && echo "--- $(basename "$f") (first 5 lines) ---" && head -n 5 "$f";
+          done
+          echo "::endgroup::"
+
+      - name: Smoke write (prove we can commit)
+        run: |
+          date -u +"%Y-%m-%dT%H
