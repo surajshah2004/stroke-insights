@@ -42,7 +42,7 @@ jobs:
           ls -la data_clean || true
           ls -la data_raw || true
 
-      # --- sanity checks ---
+      # --- sanity check for your token (not required for CSV downloads, but nice to see) ---
       - name: Check token presence
         run: |
           if [ -n "${SOCRATA_APP_TOKEN}" ]; then
@@ -51,29 +51,111 @@ jobs:
             echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export, but JSON paging may throttle)"
           fi
 
-      - name: Probe CMS endpoints (status + size)
+      # --- NEW: find the CURRENT CMS CSV links by scanning the catalog (data.json) ---
+      - name: Resolve CMS CSV download URLs (smart match via data.json)
+        shell: bash
         run: |
           set -e
-          echo "Hospitals CSV export"
-          curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD"
-          echo "Outcomes CSV export"
-          curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
+          python - << 'PY'
+          import json, sys, requests, re
 
-      # --- force-populate from CMS exports so you have data immediately ---
-      - name: Download CMS exports
+          CATALOG = "https://data.cms.gov/data.json"
+          # keyword sets for scoring likely datasets
+          HOSPITAL_KEYS = ["hospital","general","information","care compare","provider data catalog","facility"]
+          OUTCOME_KEYS  = ["complications","deaths","mortality","hospital","care compare","readmission","outcome"]
+
+          def score(text, keys):
+            t = (text or "").lower()
+            return sum(2 if k in t else 0 for k in keys)
+
+          def best_csv_for(item, keys):
+            title = item.get("title","")
+            desc  = item.get("description","")
+            dist  = item.get("distribution",[]) or []
+            base  = score(title, keys) + score(desc, keys)
+            best  = None
+            best_score = -1
+            for d in dist:
+              if d.get("mediaType") != "text/csv": 
+                continue
+              url = d.get("downloadURL") or ""
+              # bump if URL hints at the right dataset
+              url_hint = score(url, keys) + (3 if re.search(r"hospital[_-]general[_-]information", url, re.I) else 0) \
+                                       + (3 if re.search(r"complications.*deaths.*hospital", url, re.I) else 0)
+              s = base + url_hint
+              if s > best_score:
+                best_score = s
+                best = (url, title, best_score)
+            return best
+
+          print("Fetching CMS catalog …")
+          r = requests.get(CATALOG, timeout=180); r.raise_for_status()
+          datasets = r.json().get("dataset", [])
+          if not datasets:
+            print("No datasets found in data.json"); sys.exit(1)
+
+          best_h = None
+          best_o = None
+          hospital_candidates = []
+          outcome_candidates = []
+          for it in datasets:
+            h = best_csv_for(it, HOSPITAL_KEYS)
+            if h:
+              hospital_candidates.append(h)
+              if (not best_h) or h[2] > best_h[2]:
+                best_h = h
+            o = best_csv_for(it, OUTCOME_KEYS)
+            if o:
+              outcome_candidates.append(o)
+              if (not best_o) or o[2] > best_o[2]:
+                best_o = o
+
+          if not best_h or not best_o:
+            print("Could not find both datasets.")
+            print("Top Hospital-like CSVs:", sorted(hospital_candidates, key=lambda x: -x[2])[:5])
+            print("Top Outcome-like CSVs:", sorted(outcome_candidates, key=lambda x: -x[2])[:5])
+            sys.exit(1)
+
+          out = {
+            "hospital_csv": best_h[0],
+            "hospital_title": best_h[1],
+            "outcomes_csv": best_o[0],
+            "outcomes_title": best_o[1],
+          }
+          print("Resolved:")
+          print("  Hospital ->", out["hospital_title"])
+          print("  URL      ->", out["hospital_csv"])
+          print("  Outcomes ->", out["outcomes_title"])
+          print("  URL      ->", out["outcomes_csv"])
+          with open("data_raw/_cms_download_urls.json","w") as f:
+            json.dump(out, f)
+          PY
+
+      - name: Download CMS CSVs (new API)
+        shell: bash
         run: |
           set -e
-          curl -sSLo data_raw/cms_hospital_info_export.csv "https://data.cms.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD"
-          curl -sSLo data_raw/cms_outcomes_export.csv     "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
-          echo "Lines in hospital export: $(wc -l < data_raw/cms_hospital_info_export.csv || echo 0)"
-          echo "Lines in outcomes export: $(wc -l < data_raw/cms_outcomes_export.csv || echo 0)"
-          head -n 3 data_raw/cms_hospital_info_export.csv || true
-          head -n 3 data_raw/cms_outcomes_export.csv || true
+          python - << 'PY'
+          import json, requests, os
+          os.makedirs("data_raw", exist_ok=True)
+          with open("data_raw/_cms_download_urls.json") as f:
+            m = json.load(f)
+          for key, dest in [
+            ("hospital_csv", "data_raw/cms_hospital_info_export.csv"),
+            ("outcomes_csv", "data_raw/cms_outcomes_export.csv"),
+          ]:
+            url = m[key]
+            print(f"Downloading {url} -> {dest}")
+            r = requests.get(url, timeout=600)
+            r.raise_for_status()
+            with open(dest, "wb") as w:
+              w.write(r.content)
+          print("Done downloads.")
+          PY
 
       - name: Copy hospital export to clean
         run: cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
 
-      # >>> PASTE TARGET (this step goes here) <<<
       - name: Filter outcomes to stroke-only (export subset)
         shell: bash
         run: |
