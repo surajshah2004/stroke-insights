@@ -42,6 +42,24 @@ jobs:
           ls -la data_clean || true
           ls -la data_raw || true
 
+      # ---- NEW: sanity checks before hitting CMS ----
+      - name: Check token presence
+        run: |
+          if [ -n "${SOCRATA_APP_TOKEN}" ]; then
+            echo "SOCRATA_APP_TOKEN is set ✅"
+          else
+            echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export, but JSON paging may throttle)"
+          fi
+
+      - name: Probe CMS endpoints (status + size)
+        run: |
+          set -e
+          echo "Hospitals CSV export"
+          curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD"
+          echo "Outcomes CSV export"
+          curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
+      # ---- end NEW ----
+
       - name: Run CMS outcomes
         run: python etl/fetch_cms_outcomes.py
 
