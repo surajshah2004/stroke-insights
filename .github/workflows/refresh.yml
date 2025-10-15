@@ -73,26 +73,40 @@ jobs:
       - name: Copy hospital export to clean
         run: cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
 
+      # >>> PASTE TARGET (this step goes here) <<<
       - name: Filter outcomes to stroke-only (export subset)
-        run: >
-          python -c "import pandas as pd, sys, os;
-          from pathlib import Path;
-          src=Path('data_raw/cms_outcomes_export.csv'); dst=Path('data_clean/cms_stroke_outcomes.csv');
-          os.makedirs('data_clean', exist_ok=True);
-          df=pd.read_csv(src, dtype=str, low_memory=False) if src.exists() and src.stat().st_size>0 else pd.DataFrame();
-          if df.empty:
-              pd.DataFrame().to_csv(dst, index=False);
-          else:
-              if 'measure_id' in df.columns:
-                  mask=df['measure_id'].astype(str).str.contains('STK', case=False, na=False);
-              elif 'measure_name' in df.columns:
-                  mask=df['measure_name'].astype(str).str.lower().str.contains('stroke');
-              else:
-                  mask=[False]*len(df);
-              df.loc[mask].to_csv(dst, index=False);
-              print('Stroke rows:', int(mask.sum()))"
+        shell: bash
+        run: |
+          python - << 'PY'
+          import os
+          import pandas as pd
+          from pathlib import Path
 
-      # --- your original ETL (kept; now it has files to work with) ---
+          src = Path("data_raw/cms_outcomes_export.csv")
+          dst = Path("data_clean/cms_stroke_outcomes.csv")
+          os.makedirs("data_clean", exist_ok=True)
+
+          if not src.exists() or src.stat().st_size == 0:
+              print("Outcomes export not found or empty")
+              pd.DataFrame().to_csv(dst, index=False)
+          else:
+              df = pd.read_csv(src, dtype=str, low_memory=False)
+              if df.empty:
+                  print("Outcomes export is empty after read")
+                  pd.DataFrame().to_csv(dst, index=False)
+              else:
+                  if "measure_id" in df.columns:
+                      mask = df["measure_id"].astype(str).str.contains("STK", case=False, na=False)
+                  elif "measure_name" in df.columns:
+                      mask = df["measure_name"].astype(str).str.lower().str.contains("stroke")
+                  else:
+                      mask = [False] * len(df)
+                  df_stk = df.loc[mask].copy()
+                  print("Stroke rows:", int(mask.sum()))
+                  df_stk.to_csv(dst, index=False)
+          PY
+
+      # --- your original ETL (now has files to work with) ---
       - name: Run CMS outcomes
         run: python etl/fetch_cms_outcomes.py
 
