@@ -51,7 +51,7 @@ jobs:
             echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export, but JSON paging may throttle)"
           fi
 
-      # --- NEW: find the CURRENT CMS CSV links by scanning the catalog (data.json) ---
+      # --- find the CURRENT CMS CSV links by scanning the catalog (data.json) ---
       - name: Resolve CMS CSV download URLs (smart match via data.json)
         shell: bash
         run: |
@@ -76,7 +76,7 @@ jobs:
             best  = None
             best_score = -1
             for d in dist:
-              if d.get("mediaType") != "text/csv": 
+              if d.get("mediaType") != "text/csv":
                 continue
               url = d.get("downloadURL") or ""
               # bump if URL hints at the right dataset
@@ -161,31 +161,58 @@ jobs:
         run: |
           python - << 'PY'
           import os
-          import pandas as pd
+          from io import StringIO
           from pathlib import Path
+          import pandas as pd
 
           src = Path("data_raw/cms_outcomes_export.csv")
           dst = Path("data_clean/cms_stroke_outcomes.csv")
           os.makedirs("data_clean", exist_ok=True)
 
+          def read_csv_robust(path: Path) -> pd.DataFrame:
+            # try common encodings, then a final "errors=replace" fallback
+            for enc in ("utf-8", "utf-8-sig", "latin1", "cp1252"):
+              try:
+                return pd.read_csv(path, dtype=str, low_memory=False, encoding=enc)
+              except UnicodeDecodeError:
+                print(f"Decode failed with {enc}; trying next …")
+            # last resort: decode with replacement chars so parsing never dies
+            with open(path, "rb") as f:
+              text = f.read().decode("utf-8", errors="replace")
+            return pd.read_csv(StringIO(text), dtype=str, low_memory=False)
+
           if not src.exists() or src.stat().st_size == 0:
-              print("Outcomes export not found or empty")
-              pd.DataFrame().to_csv(dst, index=False)
+            print("Outcomes export not found or empty")
+            pd.DataFrame().to_csv(dst, index=False)
           else:
-              df = pd.read_csv(src, dtype=str, low_memory=False)
-              if df.empty:
-                  print("Outcomes export is empty after read")
-                  pd.DataFrame().to_csv(dst, index=False)
+            try:
+              df = read_csv_robust(src)
+            except Exception as e:
+              print("Robust read failed:", e)
+              df = pd.DataFrame()
+
+            if df.empty:
+              print("Outcomes export is empty after read")
+              pd.DataFrame().to_csv(dst, index=False)
+            else:
+              # normalize columns to lower for resilient matching
+              df.columns = [c.lower() for c in df.columns]
+
+              if "measure_id" in df.columns:
+                mask = df["measure_id"].astype(str).str.contains("stk", case=False, na=False)
+              elif "measure name" in df.columns:
+                mask = df["measure name"].astype(str).str.lower().str.contains("stroke")
               else:
-                  if "measure_id" in df.columns:
-                      mask = df["measure_id"].astype(str).str.contains("STK", case=False, na=False)
-                  elif "measure_name" in df.columns:
-                      mask = df["measure_name"].astype(str).str.lower().str.contains("stroke")
-                  else:
-                      mask = [False] * len(df)
-                  df_stk = df.loc[mask].copy()
-                  print("Stroke rows:", int(mask.sum()))
-                  df_stk.to_csv(dst, index=False)
+                # fallback: any column containing 'measure' mentions stroke
+                measure_cols = [c for c in df.columns if "measure" in c]
+                m = pd.Series(False, index=df.index)
+                for c in measure_cols:
+                  m = m | df[c].astype(str).str.lower().str.contains("stroke", na=False)
+                mask = m
+
+              df_stk = df.loc[mask].copy()
+              print("Stroke rows:", int(mask.sum()))
+              df_stk.to_csv(dst, index=False)
           PY
 
       # --- your original ETL (now has files to work with) ---
