@@ -11,7 +11,7 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; used for JSON fallback
 
     steps:
       - name: Check out repo
@@ -42,7 +42,7 @@ jobs:
           ls -la data_clean || true
           ls -la data_raw || true
 
-      # ---- sanity checks before hitting CMS ----
+      # --- sanity checks ---
       - name: Check token presence
         run: |
           if [ -n "${SOCRATA_APP_TOKEN}" ]; then
@@ -59,53 +59,40 @@ jobs:
           echo "Outcomes CSV export"
           curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
 
-      # ---- force-populate from exports (keeps things visible even if API paging hiccups) ----
-      - name: Force-populate CMS files from export (debug)
-        shell: bash
+      # --- force-populate from CMS exports so you have data immediately ---
+      - name: Download CMS exports
         run: |
           set -e
-          # download full exports
           curl -sSLo data_raw/cms_hospital_info_export.csv "https://data.cms.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD"
-          curl -sSLo data_raw/cms_outcomes_export.csv       "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
-
+          curl -sSLo data_raw/cms_outcomes_export.csv     "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
           echo "Lines in hospital export: $(wc -l < data_raw/cms_hospital_info_export.csv || echo 0)"
           echo "Lines in outcomes export: $(wc -l < data_raw/cms_outcomes_export.csv || echo 0)"
           head -n 3 data_raw/cms_hospital_info_export.csv || true
           head -n 3 data_raw/cms_outcomes_export.csv || true
 
-          # copy hospital export directly to clean
-          cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
+      - name: Copy hospital export to clean
+        run: cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
 
       - name: Filter outcomes to stroke-only (export subset)
-        shell: bash
-        run: |
-          python - <<'PY'
-import pandas as pd
-from pathlib import Path
+        run: >
+          python -c "import pandas as pd, sys, os;
+          from pathlib import Path;
+          src=Path('data_raw/cms_outcomes_export.csv'); dst=Path('data_clean/cms_stroke_outcomes.csv');
+          os.makedirs('data_clean', exist_ok=True);
+          df=pd.read_csv(src, dtype=str, low_memory=False) if src.exists() and src.stat().st_size>0 else pd.DataFrame();
+          if df.empty:
+              pd.DataFrame().to_csv(dst, index=False);
+          else:
+              if 'measure_id' in df.columns:
+                  mask=df['measure_id'].astype(str).str.contains('STK', case=False, na=False);
+              elif 'measure_name' in df.columns:
+                  mask=df['measure_name'].astype(str).str.lower().str.contains('stroke');
+              else:
+                  mask=[False]*len(df);
+              df.loc[mask].to_csv(dst, index=False);
+              print('Stroke rows:', int(mask.sum()))"
 
-src = Path("data_raw/cms_outcomes_export.csv")
-dst = Path("data_clean/cms_stroke_outcomes.csv")
-
-if not src.exists() or src.stat().st_size == 0:
-    print("Outcomes export not found or empty")
-    pd.DataFrame().to_csv(dst, index=False)
-else:
-    df = pd.read_csv(src, dtype=str, low_memory=False)
-    if df.empty:
-        print("Outcomes export is empty after read")
-        pd.DataFrame().to_csv(dst, index=False)
-    else:
-        if "measure_id" in df.columns:
-            mask = df["measure_id"].astype(str).str.contains("STK", case=False, na=False)
-        elif "measure_name" in df.columns:
-            mask = df["measure_name"].astype(str).str.lower().str.contains("stroke")
-        else:
-            mask = pd.Series([False]*len(df))
-        df_stk = df[mask].copy()
-        print("Stroke rows:", len(df_stk))
-        df_stk.to_csv(dst, index=False)
-PY
-
+      # --- your original ETL (kept; now it has files to work with) ---
       - name: Run CMS outcomes
         run: python etl/fetch_cms_outcomes.py
 
