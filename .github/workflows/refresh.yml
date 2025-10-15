@@ -60,6 +60,47 @@ jobs:
           curl -sSL -o /dev/null -w "HTTP:%{http_code} bytes:%{size_download}\n" "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
       # ---- end NEW ----
 
+      # ---- NEW: force-populate from exports so you have data immediately ----
+      - name: Force-populate CMS files from export (debug)
+        shell: bash
+        run: |
+          set -e
+          # download full exports
+          curl -sSLo data_raw/cms_hospital_info_export.csv "https://data.cms.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD"
+          curl -sSLo data_raw/cms_outcomes_export.csv       "https://data.cms.gov/api/views/ynj2-r877/rows.csv?accessType=DOWNLOAD"
+
+          echo "Lines in hospital export: $(wc -l < data_raw/cms_hospital_info_export.csv || echo 0)"
+          echo "Lines in outcomes export: $(wc -l < data_raw/cms_outcomes_export.csv || echo 0)"
+          head -n 3 data_raw/cms_hospital_info_export.csv || true
+          head -n 3 data_raw/cms_outcomes_export.csv || true
+
+          # copy hospital export directly to clean (visible immediately)
+          cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
+
+          # filter outcomes to stroke-only and save to expected clean filename
+          python - << 'PY'
+import pandas as pd
+try:
+    df = pd.read_csv("data_raw/cms_outcomes_export.csv", dtype=str, low_memory=False)
+except Exception as e:
+    print("Failed to read outcomes export:", e)
+    df = pd.DataFrame()
+if not df.empty:
+    if "measure_id" in df.columns:
+        mask = df["measure_id"].astype(str).str.contains("STK", case=False, na=False)
+    elif "measure_name" in df.columns:
+        mask = df["measure_name"].astype(str).str.lower().str.contains("stroke")
+    else:
+        mask = pd.Series([False]*len(df))
+    df_stk = df[mask].copy()
+    print("Stroke rows:", len(df_stk))
+    df_stk.to_csv("data_clean/cms_stroke_outcomes.csv", index=False)
+else:
+    print("Outcomes export is empty")
+    pd.DataFrame().to_csv("data_clean/cms_stroke_outcomes.csv", index=False)
+PY
+      # ---- end NEW ----
+
       - name: Run CMS outcomes
         run: python etl/fetch_cms_outcomes.py
 
