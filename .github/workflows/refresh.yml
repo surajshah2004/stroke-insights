@@ -11,7 +11,7 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; not needed for CSV downloads
 
     steps:
       - name: Check out repo
@@ -56,18 +56,18 @@ jobs:
         run: |
           set -e
           python - << 'PY'
-          import json, sys, requests, re, csv, io, os
+          import json, sys, requests, re, os
 
           CAT = "https://data.cms.gov/data.json"
-          H_POS = ["hospital","general","information","care compare","provider data catalog","facility","address","ccn","provider id","zip","city","state"]
-          H_NEG = ["ownership","associate","enrollment","pecos","owner","investor","enforcement","action","deficiency","survey","inspection"]
-          O_POS = ["complications","deaths","mortality","outcome","readmission","measure","hospital","care compare"]
-          O_NEG = ["ownership","associate","enrollment","pecos","enforcement","action"]
 
-          def score_pos(t,keys): 
-              t=(t or "").lower(); return sum(2 for k in keys if k in t)
-          def score_neg(t,keys):
-              t=(t or "").lower(); return sum(3 for k in keys if k in t)
+          # Stronger keywording
+          H_POS = ["care compare","hospital","general information","provider data catalog","facility","ccn","provider id","address","city","state","zip"]
+          H_NEG = ["ownership","associate","enrollment","pecos","owner","investor","enforcement","action","deficiency","survey","inspection","mds","minimum data set"]
+          O_POS = ["stroke","ischemic","complications","deaths","mortality","outcome","readmission","measure","hospital","care compare"]
+          O_NEG = ["ownership","associate","enrollment","pecos","enforcement","action","mds"]
+
+          def score_pos(t,keys): t=(t or "").lower(); return sum(3 for k in keys if k in t)
+          def score_neg(t,keys): t=(t or "").lower(); return sum(4 for k in keys if k in t)
 
           def candidates_for(item, pos, neg, url_hints=None):
               title=item.get("title","") or ""
@@ -78,7 +78,7 @@ jobs:
                   if d.get("mediaType")!="text/csv": 
                       continue
                   url=d.get("downloadURL") or ""
-                  s=base + score_pos(url,pos)-score_neg(url,neg)
+                  s=base + score_pos(url,pos) - score_neg(url,neg)
                   if url_hints:
                       for rx,bonus in url_hints:
                           if re.search(rx,url,re.I): s+=bonus
@@ -88,43 +88,49 @@ jobs:
           print("Fetching CMS catalog …")
           r=requests.get(CAT,timeout=180); r.raise_for_status()
           ds=r.json().get("dataset",[])
-          cand_h=[]; cand_o=[]
-          HINTS_H=[(r"hospital[-_]general[-_]information",10),(r"care[-_]compare.*hospital",6)]
-          HINTS_O=[(r"complications.*deaths.*hospital",10),(r"hospital.*complications",6),(r"mortality.*hospital",6)]
-          for it in ds:
-              cand_h += candidates_for(it,H_POS,H_NEG,HINTS_H)
-              cand_o += candidates_for(it,O_POS,O_NEG,HINTS_O)
 
-          cand_h = sorted(cand_h, key=lambda x: -x[0])[:20]
-          cand_o = sorted(cand_o, key=lambda x: -x[0])[:20]
+          cand_h=[]; cand_o=[]
+          H_HINT=[(r"hospital[-_]general[-_]information",12),(r"care[-_]compare.*hospital",8)]
+          O_HINT=[(r"stroke",15),(r"ischemic",12),(r"complications.*deaths.*hospital",8),(r"mortality.*hospital",6)]
+
+          for it in ds:
+              cand_h += candidates_for(it,H_POS,H_NEG,H_HINT)
+              cand_o += candidates_for(it,O_POS,O_NEG,O_HINT)
+
+          cand_h = sorted(cand_h, key=lambda x: -x[0])[:40]
+          cand_o = sorted(cand_o, key=lambda x: -x[0])[:60]
           print("Top hospital candidates:", [t for _,_,t in cand_h[:5]])
           print("Top outcomes candidates:", [t for _,_,t in cand_o[:5]])
 
           headers = {"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
-          os.makedirs("data_raw",exist_ok=True)
 
           def first_line(url):
-              r = requests.get(url, timeout=120, headers=headers, allow_redirects=True)
+              r = requests.get(url, timeout=60, headers=headers, allow_redirects=True)
               ct=(r.headers.get("Content-Type","") or "").lower()
-              if r.status_code!=200 or "csv" not in ct:
-                  return None, f"bad status/type {r.status_code}/{ct}"
-              chunk = r.content.splitlines()[0:1]
-              if not chunk: return None, "no bytes"
+              if r.status_code!=200 or "csv" not in ct or not r.content:
+                  return None
               try:
-                  text = chunk[0].decode("utf-8", errors="replace")
+                  return r.content.splitlines()[0].decode("utf-8", errors="replace")
               except Exception:
-                  text = chunk[0].decode("latin1","replace")
-              return text.strip(), None
+                  return r.content.splitlines()[0].decode("latin1","replace")
 
           def looks_like_directory(header):
-              h = (header or "").lower()
-              return any(k in h for k in ["ccn","provider id","facility id"]) or \
-                     (("hospital" in h or "provider" in h) and ("address" in h) and ("city" in h) and ("state" in h))
-
-          def looks_like_outcomes(header):
               h=(header or "").lower()
-              return any(k in h for k in ["measure_id","measure id","measure_name","measure name","condition","topic"]) \
-                     or ("readmission" in h or "mortality" in h or "complication" in h)
+              has_id   = any(k in h for k in ["ccn","provider id","facility id"])
+              has_name = ("hospital" in h) or ("provider name" in h) or ("hospital name" in h)
+              has_addr = "address" in h
+              has_loc  = ("city" in h and "state" in h and ("zip" in h or "zip code" in h))
+              return has_id and has_name and has_addr and has_loc
+
+          def looks_like_outcomes(header, title_or_url):
+              h=(header or "").lower()
+              t=(title_or_url or "").lower()
+              # Accept if explicitly stroke in title/url
+              if "stroke" in t or "ischemic" in t:
+                  return True
+              # Otherwise require measure/condition-ish columns
+              has_measures = any(k in h for k in ["measure_id","measure id","measure_name","measure name","condition","topic"])
+              return has_measures
 
           def download(url, dest):
               r=requests.get(url, timeout=600, headers=headers, allow_redirects=True)
@@ -134,37 +140,42 @@ jobs:
               with open(dest,"wb") as w: w.write(r.content)
               print(f"Wrote {dest} ({len(r.content)} bytes)")
 
-          # pick hospital directory
-          hosp_url=None
+          # pick hospital directory (must have address)
+          hosp_url=None; hosp_hdr=None; hosp_title=None
           for _,url,title in cand_h:
-              line, err = first_line(url)
-              print("Try HOSP:", title, "->", url, "| first line ok?", err is None)
-              if line and looks_like_directory(line):
-                  hosp_url = url
-                  print("Selected HOSP by header ✅:", line[:200])
+              line=first_line(url)
+              ok= looks_like_directory(line)
+              print("Try HOSP:", title, "| header ok?", ok, "| url:", url)
+              if ok:
+                  hosp_url=url; hosp_hdr=line; hosp_title=title
                   break
           if not hosp_url:
               print("ERROR: no hospital directory candidate passed header check"); sys.exit(1)
 
-          # pick outcomes
-          out_url=None
+          # pick outcomes (prefer stroke in title/url; else measure/condition header)
+          out_url=None; out_hdr=None; out_title=None
           for _,url,title in cand_o:
-              line, err = first_line(url)
-              print("Try OUT :", title, "->", url, "| first line ok?", err is None)
-              if line and looks_like_outcomes(line):
-                  out_url = url
-                  print("Selected OUT by header ✅:", line[:200])
+              line=first_line(url)
+              ok= looks_like_outcomes(line, f"{title} {url}")
+              print("Try OUT :", title, "| header ok?", ok, "| url:", url)
+              if ok:
+                  out_url=url; out_hdr=line; out_title=title
                   break
           if not out_url:
               print("ERROR: no outcomes candidate passed header check"); sys.exit(1)
 
-          # download full CSVs
+          os.makedirs("data_raw",exist_ok=True)
           download(hosp_url, "data_raw/cms_hospital_info_export.csv")
           download(out_url , "data_raw/cms_outcomes_export.csv")
 
-          # stash chosen URLs for visibility
           with open("data_raw/_cms_download_urls.json","w") as f:
-              json.dump({"hospital_csv":hosp_url,"outcomes_csv":out_url}, f)
+              json.dump({"hospital_csv":hosp_url,"outcomes_csv":out_url,
+                         "hospital_header":hosp_hdr,"outcomes_header":out_hdr,
+                         "hospital_title":hosp_title,"outcomes_title":out_title}, f)
+          print("Selected HOSP ✅", hosp_title, "->", hosp_url)
+          print("Header:", hosp_hdr)
+          print("Selected OUT  ✅", out_title, "->", out_url)
+          print("Header:", out_hdr)
           PY
 
       # ---------- copy hospital directory if non-empty & looks right ----------
