@@ -11,7 +11,7 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; not needed for CSV downloads
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; not required for CSV downloads
 
     steps:
       - name: Check out repo
@@ -50,21 +50,21 @@ jobs:
             echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export)"
           fi
 
-      # ---------- robust resolver: find candidates, validate headers, then download full CSVs ----------
-      - name: Resolve & download CMS CSVs (header-validated)
+      # ---------- robust resolver: candidates -> header check -> download (with 429/5xx backoff) ----------
+      - name: Resolve & download CMS CSVs (header-validated, with backoff)
         shell: bash
         run: |
           set -e
           python - << 'PY'
-          import json, sys, requests, re, os
+          import json, sys, requests, re, os, time, random
 
           CAT = "https://data.cms.gov/data.json"
 
-          # Stronger keywording
+          # Positive/negative signals (aggressively exclude wrong families)
           H_POS = ["care compare","hospital","general information","provider data catalog","facility","ccn","provider id","address","city","state","zip"]
-          H_NEG = ["ownership","associate","enrollment","pecos","owner","investor","enforcement","action","deficiency","survey","inspection","mds","minimum data set"]
+          H_NEG = ["ownership","associate","enrollment","pecos","owner","investor","enforcement","action","deficiency","survey","inspection","mds","minimum data set","dialysis","service area","cost report"]
           O_POS = ["stroke","ischemic","complications","deaths","mortality","outcome","readmission","measure","hospital","care compare"]
-          O_NEG = ["ownership","associate","enrollment","pecos","enforcement","action","mds"]
+          O_NEG = ["ownership","associate","enrollment","pecos","enforcement","action","mds","dialysis","service area","cost report","psi","hac"]
 
           def score_pos(t,keys): t=(t or "").lower(); return sum(3 for k in keys if k in t)
           def score_neg(t,keys): t=(t or "").lower(); return sum(4 for k in keys if k in t)
@@ -85,39 +85,67 @@ jobs:
                   out.append((s,url,title))
               return out
 
+          def http_get(url, headers, timeout=20, retries=4, sleep_base=1.0):
+              for i in range(retries):
+                  try:
+                      r=requests.get(url, timeout=timeout, headers=headers, allow_redirects=True)
+                      if r.status_code in (200,206):
+                          return r
+                      if r.status_code in (429,500,502,503,504):
+                          t=sleep_base*(2**i)+random.uniform(0,0.6)
+                          time.sleep(t); continue
+                      return r
+                  except requests.exceptions.RequestException:
+                      t=sleep_base*(2**i)+random.uniform(0,0.6)
+                      time.sleep(t)
+              return None
+
           print("Fetching CMS catalog …")
-          r=requests.get(CAT,timeout=180); r.raise_for_status()
+          r=requests.get(CAT,timeout=60); r.raise_for_status()
           ds=r.json().get("dataset",[])
 
-          cand_h=[]; cand_o=[]
           H_HINT=[(r"hospital[-_]general[-_]information",12),(r"care[-_]compare.*hospital",8)]
           O_HINT=[(r"stroke",15),(r"ischemic",12),(r"complications.*deaths.*hospital",8),(r"mortality.*hospital",6)]
 
+          cand_h=[]; cand_o=[]
           for it in ds:
               cand_h += candidates_for(it,H_POS,H_NEG,H_HINT)
               cand_o += candidates_for(it,O_POS,O_NEG,O_HINT)
 
-          cand_h = sorted(cand_h, key=lambda x: -x[0])[:40]
-          cand_o = sorted(cand_o, key=lambda x: -x[0])[:60]
+          # sort/trim + drop noisy families
+          def drop_bad(cands):
+              out=[]
+              for s,u,t in sorted(cands, key=lambda x: -x[0]):
+                  combo=(t.lower()+" "+u.lower())
+                  if any(b in combo for b in ["service area","dialysis","ownership","enforcement","cost report"]):
+                      continue
+                  out.append((s,u,t))
+              return out
+
+          cand_h = drop_bad(cand_h)[:10]
+          cand_o = [c for c in drop_bad(cand_o) if all(b not in (c[2].lower()+c[1].lower()) for b in ["psi","hac"] )][:16]
+
           print("Top hospital candidates:", [t for _,_,t in cand_h[:5]])
           print("Top outcomes candidates:", [t for _,_,t in cand_o[:5]])
 
-          headers = {"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
+          peek_headers = {"User-Agent":"github-actions/etl","Accept":"text/csv, */*","Range":"bytes=0-4095"}
 
           def first_line(url):
-              r = requests.get(url, timeout=60, headers=headers, allow_redirects=True)
+              r = http_get(url, peek_headers, timeout=15, retries=4, sleep_base=1.0)
+              if not r: return None
               ct=(r.headers.get("Content-Type","") or "").lower()
-              if r.status_code!=200 or "csv" not in ct or not r.content:
+              if ("csv" not in ct) or (not r.content):
                   return None
               try:
                   return r.content.splitlines()[0].decode("utf-8", errors="replace")
               except Exception:
-                  return r.content.splitlines()[0].decode("latin1","replace")
+                  try: return r.content.splitlines()[0].decode("latin1","replace")
+                  except Exception: return None
 
           def looks_like_directory(header):
               h=(header or "").lower()
               has_id   = any(k in h for k in ["ccn","provider id","facility id"])
-              has_name = ("hospital" in h) or ("provider name" in h) or ("hospital name" in h)
+              has_name = any(k in h for k in ["hospital name","provider name","hospital"])
               has_addr = "address" in h
               has_loc  = ("city" in h and "state" in h and ("zip" in h or "zip code" in h))
               return has_id and has_name and has_addr and has_loc
@@ -125,53 +153,56 @@ jobs:
           def looks_like_outcomes(header, title_or_url):
               h=(header or "").lower()
               t=(title_or_url or "").lower()
-              # Accept if explicitly stroke in title/url
-              if "stroke" in t or "ischemic" in t:
+              if ("stroke" in t) or ("ischemic" in t):
                   return True
-              # Otherwise require measure/condition-ish columns
-              has_measures = any(k in h for k in ["measure_id","measure id","measure_name","measure name","condition","topic"])
-              return has_measures
+              return any(k in h for k in ["measure_id","measure id","measure_name","measure name","condition","topic","category"])
 
-          def download(url, dest):
-              r=requests.get(url, timeout=600, headers=headers, allow_redirects=True)
+          def download_full(url, dest):
+              headers={"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
+              r=http_get(url, headers, timeout=180, retries=4, sleep_base=1.5)
+              if not r:
+                  raise RuntimeError("download retries exhausted")
               ct=(r.headers.get("Content-Type","") or "").lower()
               if r.status_code!=200 or "csv" not in ct or len(r.content)<200:
                   raise RuntimeError(f"download failed {r.status_code}/{ct}, size={len(r.content)}")
               with open(dest,"wb") as w: w.write(r.content)
               print(f"Wrote {dest} ({len(r.content)} bytes)")
 
-          # pick hospital directory (must have address)
-          hosp_url=None; hosp_hdr=None; hosp_title=None
+          # choose hospital directory
+          hosp_url=hosp_title=hosp_hdr=None
           for _,url,title in cand_h:
               line=first_line(url)
               ok= looks_like_directory(line)
               print("Try HOSP:", title, "| header ok?", ok, "| url:", url)
               if ok:
-                  hosp_url=url; hosp_hdr=line; hosp_title=title
-                  break
+                  hosp_url=url; hosp_title=title; hosp_hdr=line; break
           if not hosp_url:
               print("ERROR: no hospital directory candidate passed header check"); sys.exit(1)
 
-          # pick outcomes (prefer stroke in title/url; else measure/condition header)
-          out_url=None; out_hdr=None; out_title=None
-          for _,url,title in cand_o:
+          # choose outcomes (prefer stroke/ischemic in title/url first)
+          stroke_first = [c for c in cand_o if ("stroke" in (c[2].lower()+c[1].lower()) or "ischemic" in (c[2].lower()+c[1].lower()))] \
+                       + [c for c in cand_o if ("stroke" not in (c[2].lower()+c[1].lower()) and "ischemic" not in (c[2].lower()+c[1].lower()))]
+
+          out_url=out_title=out_hdr=None
+          for _,url,title in stroke_first:
               line=first_line(url)
               ok= looks_like_outcomes(line, f"{title} {url}")
               print("Try OUT :", title, "| header ok?", ok, "| url:", url)
               if ok:
-                  out_url=url; out_hdr=line; out_title=title
-                  break
+                  out_url=url; out_title=title; out_hdr=line; break
           if not out_url:
               print("ERROR: no outcomes candidate passed header check"); sys.exit(1)
 
           os.makedirs("data_raw",exist_ok=True)
-          download(hosp_url, "data_raw/cms_hospital_info_export.csv")
-          download(out_url , "data_raw/cms_outcomes_export.csv")
+          download_full(hosp_url, "data_raw/cms_hospital_info_export.csv")
+          download_full(out_url , "data_raw/cms_outcomes_export.csv")
 
           with open("data_raw/_cms_download_urls.json","w") as f:
-              json.dump({"hospital_csv":hosp_url,"outcomes_csv":out_url,
-                         "hospital_header":hosp_hdr,"outcomes_header":out_hdr,
-                         "hospital_title":hosp_title,"outcomes_title":out_title}, f)
+              json.dump({
+                "hospital_csv":hosp_url,"outcomes_csv":out_url,
+                "hospital_header":hosp_hdr,"outcomes_header":out_hdr,
+                "hospital_title":hosp_title,"outcomes_title":out_title
+              }, f)
           print("Selected HOSP ✅", hosp_title, "->", hosp_url)
           print("Header:", hosp_hdr)
           print("Selected OUT  ✅", out_title, "->", out_url)
