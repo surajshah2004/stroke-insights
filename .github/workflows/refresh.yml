@@ -11,7 +11,7 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; used for JSON fallback
 
     steps:
       - name: Check out repo
@@ -42,6 +42,7 @@ jobs:
           ls -la data_clean || true
           ls -la data_raw || true
 
+      # --- token sanity (not required for CSV downloads) ---
       - name: Check token presence
         run: |
           if [ -n "${SOCRATA_APP_TOKEN}" ]; then
@@ -50,110 +51,166 @@ jobs:
             echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export)"
           fi
 
-      # Find the current CMS CSV links from the catalog
+      # --- find current CMS CSV links by scanning the catalog (data.json) ---
       - name: Resolve CMS CSV download URLs (smart match via data.json)
         shell: bash
         run: |
           set -e
           python - << 'PY'
           import json, sys, requests, re
+
           CATALOG = "https://data.cms.gov/data.json"
           HOSPITAL_KEYS = ["hospital","general","information","care compare","provider data catalog","facility"]
           OUTCOME_KEYS  = ["complications","deaths","mortality","hospital","care compare","readmission","outcome"]
-          def score(t, keys): t=(t or "").lower(); return sum(2 if k in t else 0 for k in keys)
+
+          def score(text, keys):
+            t = (text or "").lower()
+            return sum(2 if k in t else 0 for k in keys)
+
           def best_csv_for(item, keys):
-            title=item.get("title",""); desc=item.get("description",""); dist=item.get("distribution",[]) or []
-            base=score(title,keys)+score(desc,keys); best=None; best_score=-1
+            title = item.get("title","")
+            desc  = item.get("description","")
+            dist  = item.get("distribution",[]) or []
+            base  = score(title, keys) + score(desc, keys)
+            best  = None
+            best_score = -1
             for d in dist:
-              if d.get("mediaType")!="text/csv": continue
-              url=d.get("downloadURL") or ""; url_hint=score(url,keys)+ (3 if re.search(r"hospital[_-]general[_-]information",url,re.I) else 0) + (3 if re.search(r"complications.*deaths.*hospital",url,re.I) else 0)
-              s=base+url_hint
-              if s>best_score: best_score=s; best=(url,title,best_score)
+              if d.get("mediaType") != "text/csv":
+                continue
+              url = d.get("downloadURL") or ""
+              url_hint = score(url, keys) \
+                        + (3 if re.search(r"hospital[_-]general[_-]information", url, re.I) else 0) \
+                        + (3 if re.search(r"complications.*deaths.*hospital", url, re.I) else 0)
+              s = base + url_hint
+              if s > best_score:
+                best_score = s
+                best = (url, title, best_score)
             return best
+
           print("Fetching CMS catalog …")
-          r=requests.get(CATALOG,timeout=180); r.raise_for_status()
-          datasets=r.json().get("dataset",[])
-          best_h=best_o=None
-          hospital_candidates=[]; outcome_candidates=[]
+          r = requests.get(CATALOG, timeout=180); r.raise_for_status()
+          datasets = r.json().get("dataset", [])
+          if not datasets:
+            print("No datasets found in data.json"); sys.exit(1)
+
+          best_h = None
+          best_o = None
           for it in datasets:
-            h=best_csv_for(it,HOSPITAL_KEYS)
-            if h: hospital_candidates.append(h); best_h=h if (not best_h or h[2]>best_h[2]) else best_h
-            o=best_csv_for(it,OUTCOME_KEYS)
-            if o: outcome_candidates.append(o); best_o=o if (not best_o or o[2]>best_o[2]) else best_o
+            h = best_csv_for(it, HOSPITAL_KEYS)
+            if h and (not best_h or h[2] > best_h[2]):
+              best_h = h
+            o = best_csv_for(it, OUTCOME_KEYS)
+            if o and (not best_o or o[2] > best_o[2]):
+              best_o = o
+
           if not best_h or not best_o:
-            print("Could not find both datasets.")
-            print("Top Hospital-like CSVs:", sorted(hospital_candidates, key=lambda x: -x[2])[:5])
-            print("Top Outcome-like CSVs:", sorted(outcome_candidates, key=lambda x: -x[2])[:5])
+            print("ERROR: Could not find both datasets.")
             sys.exit(1)
-          out={"hospital_csv":best_h[0],"hospital_title":best_h[1],
-               "outcomes_csv":best_o[0],"outcomes_title":best_o[1]}
-          print("Resolved:")
-          print("  Hospital ->", out["hospital_title"])
-          print("  URL      ->", out["hospital_csv"])
-          print("  Outcomes ->", out["outcomes_title"])
-          print("  URL      ->", out["outcomes_csv"])
-          with open("data_raw/_cms_download_urls.json","w") as f: json.dump(out,f)
+
+          out = {
+            "hospital_csv": best_h[0],
+            "hospital_title": best_h[1],
+            "outcomes_csv": best_o[0],
+            "outcomes_title": best_o[1],
+          }
+          print("Resolved HOSP:", out["hospital_title"], "->", out["hospital_csv"])
+          print("Resolved OUT :", out["outcomes_title"], "->", out["outcomes_csv"])
+          with open("data_raw/_cms_download_urls.json","w") as f:
+            json.dump(out, f)
           PY
 
-      - name: Download CMS CSVs (new API)
+      - name: Download CMS CSVs (validate content-type & size)
         shell: bash
         run: |
           set -e
           python - << 'PY'
-          import json, requests, os
+          import json, requests, os, sys
           os.makedirs("data_raw", exist_ok=True)
-          with open("data_raw/_cms_download_urls.json") as f: m=json.load(f)
-          for key,dest in [("hospital_csv","data_raw/cms_hospital_info_export.csv"),
-                           ("outcomes_csv","data_raw/cms_outcomes_export.csv")]:
-            url=m[key]; print(f"Downloading {url} -> {dest}")
-            r=requests.get(url,timeout=600); r.raise_for_status()
-            open(dest,"wb").write(r.content)
-          print("Done downloads.")
+          with open("data_raw/_cms_download_urls.json") as f:
+            m = json.load(f)
+
+          def fetch(url, dest):
+            headers = {"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
+            r = requests.get(url, timeout=600, headers=headers, allow_redirects=True)
+            ct = (r.headers.get("Content-Type","") or "").lower()
+            if r.status_code != 200 or "csv" not in ct:
+              print(f"ERROR: Bad response for {url} -> status {r.status_code}, content-type {ct}")
+              sys.exit(1)
+            if not r.content or len(r.content) < 100:
+              print(f"ERROR: Very small download for {url} ({len(r.content)} bytes)")
+              sys.exit(1)
+            with open(dest, "wb") as w:
+              w.write(r.content)
+            print(f"OK: wrote {dest} ({len(r.content)} bytes)")
+
+          fetch(m["hospital_csv"], "data_raw/cms_hospital_info_export.csv")
+          fetch(m["outcomes_csv"], "data_raw/cms_outcomes_export.csv")
           PY
 
-      - name: Copy hospital export to clean
-        run: cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
-
-      - name: Filter outcomes to stroke-only (export subset)
+      - name: Copy hospital export to clean (only if non-empty)
         shell: bash
         run: |
+          set -e
+          if [ -s data_raw/cms_hospital_info_export.csv ]; then
+            cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
+            echo "Copied hospital CSV to data_clean/"
+          else
+            echo "ERROR: hospital export is empty"; exit 1
+          fi
+          wc -c data_raw/cms_hospital_info_export.csv || true
+          wc -c data_raw/cms_outcomes_export.csv || true
+
+      - name: Filter outcomes to stroke-only (robust encoding; only if non-empty)
+        shell: bash
+        run: |
+          set -e
+          if [ ! -s data_raw/cms_outcomes_export.csv ]; then
+            echo "ERROR: outcomes export missing or empty"; exit 1
+          fi
           python - << 'PY'
           import os
           from io import StringIO
           from pathlib import Path
           import pandas as pd
-          src=Path("data_raw/cms_outcomes_export.csv"); dst=Path("data_clean/cms_stroke_outcomes.csv")
+
+          src = Path("data_raw/cms_outcomes_export.csv")
+          dst = Path("data_clean/cms_stroke_outcomes.csv")
           os.makedirs("data_clean", exist_ok=True)
-          def read_csv_robust(p: Path)->pd.DataFrame:
+
+          def read_csv_robust(path: Path) -> pd.DataFrame:
             for enc in ("utf-8","utf-8-sig","latin1","cp1252"):
-              try: return pd.read_csv(p,dtype=str,low_memory=False,encoding=enc)
-              except UnicodeDecodeError: print(f"Decode failed with {enc}; trying next …")
-            with open(p,"rb") as f: text=f.read().decode("utf-8",errors="replace")
-            return pd.read_csv(StringIO(text),dtype=str,low_memory=False)
-          if not src.exists() or src.stat().st_size==0:
-            print("Outcomes export not found or empty"); pd.DataFrame().to_csv(dst,index=False)
+              try:
+                return pd.read_csv(path, dtype=str, low_memory=False, encoding=enc)
+              except UnicodeDecodeError:
+                print(f"Decode failed with {enc}; trying next …")
+            with open(path, "rb") as f:
+              text = f.read().decode("utf-8", errors="replace")
+            return pd.read_csv(StringIO(text), dtype=str, low_memory=False)
+
+          df = read_csv_robust(src)
+          if df.empty:
+            print("ERROR: outcomes export read empty"); raise SystemExit(1)
+
+          # normalize columns to lower
+          df.columns = [c.lower() for c in df.columns]
+
+          if "measure_id" in df.columns:
+            mask = df["measure_id"].astype(str).str.contains("stk", case=False, na=False)
+          elif "measure name" in df.columns:
+            mask = df["measure name"].astype(str).str.lower().str.contains("stroke")
           else:
-            try: df=read_csv_robust(src)
-            except Exception as e: print("Robust read failed:",e); df=pd.DataFrame()
-            if df.empty:
-              print("Outcomes export is empty after read"); pd.DataFrame().to_csv(dst,index=False)
-            else:
-              df.columns=[c.lower() for c in df.columns]
-              if "measure_id" in df.columns:
-                mask=df["measure_id"].astype(str).str.contains("stk",case=False,na=False)
-              elif "measure name" in df.columns:
-                mask=df["measure name"].astype(str).str.lower().str.contains("stroke")
-              else:
-                measure_cols=[c for c in df.columns if "measure" in c]
-                m=pd.Series(False,index=df.index)
-                for c in measure_cols: m = m | df[c].astype(str).str.lower().str.contains("stroke",na=False)
-                mask=m
-              df_stk=df.loc[mask].copy()
-              print("Stroke rows:", int(mask.sum()))
-              df_stk.to_csv(dst,index=False)
+            measure_cols = [c for c in df.columns if "measure" in c]
+            m = pd.Series(False, index=df.index)
+            for c in measure_cols:
+              m = m | df[c].astype(str).str.lower().str.contains("stroke", na=False)
+            mask = m
+
+          df_stk = df.loc[mask].copy()
+          print("Stroke rows:", int(mask.sum()))
+          df_stk.to_csv(dst, index=False)
           PY
 
-      # NOTE: CMS ETL steps removed so they don't overwrite the files we just created
+      # --- CMS Python ETL steps removed to avoid overwriting the clean files above ---
 
       - name: Run CDC county
         run: python etl/fetch_cdc_stroke_county.py
