@@ -6,10 +6,14 @@ RAW = Path("data_raw")
 CLEAN = Path("data_clean")
 CLEAN.mkdir(exist_ok=True)
 
+########################
+# helpers
+########################
+
 def read_csv_robust(path: Path) -> pd.DataFrame:
     """
     Try multiple encodings so CMS/CDC/ACS files don't blow up.
-    Returns empty DataFrame if file doesn't exist.
+    Returns empty DataFrame if file doesn't exist or is tiny.
     """
     if not path.exists() or path.stat().st_size == 0:
         return pd.DataFrame()
@@ -20,10 +24,10 @@ def read_csv_robust(path: Path) -> pd.DataFrame:
         except UnicodeDecodeError:
             continue
         except Exception:
-            # file exists but other parse issue, break out later
+            # fall through and try fallback below
             pass
 
-    # last-ditch: replace bad bytes
+    # last-ditch: replace invalid bytes
     try:
         raw_bytes = path.read_bytes()
         txt = raw_bytes.decode("utf-8", errors="replace")
@@ -31,27 +35,33 @@ def read_csv_robust(path: Path) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
 def get_first(df: pd.DataFrame, *cands):
     """
-    Return the first column name from df that matches any of the
-    provided lowercase substrings in order.
+    Return the first df column whose name either equals or contains any of the
+    provided candidate strings (case-insensitive). If none, return None.
     """
+    if df.empty:
+        return None
     cols = list(df.columns)
     lowmap = {c.lower(): c for c in cols}
+    # exact match pass
     for cand in cands:
-        cand = cand.lower()
-        # exact match first
-        if cand in lowmap:
-            return lowmap[cand]
-        # then substring match
+        cand_l = cand.lower()
+        if cand_l in lowmap:
+            return lowmap[cand_l]
+    # substring pass
+    for cand in cands:
+        cand_l = cand.lower()
         for c in cols:
-            if cand in c.lower():
+            if cand_l in c.lower():
                 return c
     return None
 
-############################
-# 1. COUNTY PROFILE
-############################
+
+########################
+# 1. Build county_profile
+########################
 
 cdc = read_csv_robust(CLEAN / "cdc_stroke_mortality_county.csv")
 acs = read_csv_robust(CLEAN / "acs_uninsured_county.csv")
@@ -59,7 +69,7 @@ acs = read_csv_robust(CLEAN / "acs_uninsured_county.csv")
 county_profile = pd.DataFrame()
 
 if not cdc.empty:
-    # try to identify key columns in CDC stroke mortality file
+    # identify columns in the CDC stroke mortality file
     fips_col   = get_first(cdc, "fips", "county_fips", "county_fips_code", "fips code")
     county_col = get_first(cdc, "county name", "county", "county_name")
     state_col  = get_first(cdc, "state", "state_name", "state_abbrev")
@@ -74,14 +84,12 @@ if not cdc.empty:
 
     cdc_tmp = cdc_tmp.rename(columns=rename_map)
 
-    # just keep the columns we care about (drop duplicates if multiple years etc.)
     keep_cols = ["county_fips", "county_name", "state", "stroke_mortality_rate"]
     cdc_tmp = cdc_tmp[[c for c in keep_cols if c in cdc_tmp.columns]].drop_duplicates()
 
     county_profile = cdc_tmp
 
 if not acs.empty:
-    # pull uninsured rate and fips
     acs_tmp = acs.copy()
     fips_col2 = get_first(acs_tmp, "fips", "county_fips", "fips code")
     unins_col = None
@@ -98,47 +106,46 @@ if not acs.empty:
     acs_tmp = acs_tmp.rename(columns=rename_map2)
     acs_tmp = acs_tmp[[c for c in ["county_fips", "uninsured_rate"] if c in acs_tmp.columns]].drop_duplicates()
 
-    if not county_profile.empty and "county_fips" in county_profile.columns and "county_fips" in acs_tmp.columns:
+    if (
+        not county_profile.empty
+        and "county_fips" in county_profile.columns
+        and "county_fips" in acs_tmp.columns
+    ):
         county_profile = county_profile.merge(acs_tmp, on="county_fips", how="left")
     else:
-        # fallback: if CDC data was empty, at least export uninsured info
+        # fallback if CDC was empty
         county_profile = acs_tmp
 
-# compute a simple "burden index": stroke mortality x uninsured%
+# compute basic "burden_index" = stroke mortality rate * uninsured %, scaled
 if (
     not county_profile.empty
     and "stroke_mortality_rate" in county_profile.columns
     and "uninsured_rate" in county_profile.columns
 ):
-    # Try to coerce both to numeric
     def to_float_series(s):
         return pd.to_numeric(
             s.astype(str).str.replace("%", "", regex=False),
             errors="coerce"
         )
-
     smr = to_float_series(county_profile["stroke_mortality_rate"])
     unins = to_float_series(county_profile["uninsured_rate"])
     county_profile["burden_index"] = (smr * unins) / 100.0
 
 county_profile.to_csv(CLEAN / "county_profile.csv", index=False)
 
-############################
-# 2. HOSPITAL PROFILE
-############################
 
-hosp_info = read_csv_robust(CLEAN / "cms_hospital_info.csv")
-stroke_out = read_csv_robust(CLEAN / "cms_stroke_outcomes.csv")
+########################
+# 2. Prepare hospital_info (from CMS raw into clean)
+########################
 
-hospital_profile = pd.DataFrame()
+raw_hosp = read_csv_robust(RAW / "cms_hospital_info_export.csv")
 
-if not hosp_info.empty:
-    hi = hosp_info.copy()
+if not raw_hosp.empty:
+    # attempt to identify expected columns
+    hi = raw_hosp.copy()
 
-    # find ID and location columns in hospital info
     fac_id_col = (
-        get_first(hi, "ccn", "cms certification number", "facility id", "provider id", "facility id ")
-        or get_first(hi, "facility id")
+        get_first(hi, "ccn", "cms certification number", "facility id", "provider id")
     )
     name_col   = get_first(hi, "hospital name", "provider name", "facility name")
     addr_col   = get_first(hi, "address", "address line 1")
@@ -163,49 +170,102 @@ if not hosp_info.empty:
     keep_hi = ["facility_id","hospital_name","address","city","state","zip","county","phone"]
     hi = hi[[c for c in keep_hi if c in hi.columns]].drop_duplicates()
 
-    hospital_profile = hi
+    # write cleaned hospital info
+    hi.to_csv(CLEAN / "cms_hospital_info.csv", index=False)
+else:
+    # make sure file exists, even if empty
+    pd.DataFrame().to_csv(CLEAN / "cms_hospital_info.csv", index=False)
 
-    if not stroke_out.empty:
-        so = stroke_out.copy()
-        # stroke_out is already filtered to rows where measure mentions "stroke"
-        # We want something like hospital-level stroke mortality or readmission score.
 
-        so_fac_col = (
-            get_first(so, "facility id", "ccn", "provider id", "cms certification number")
-            or get_first(so, "facility_id")
+########################
+# 3. Prepare stroke_outcomes (from CMS raw into clean)
+########################
+
+raw_outcomes = read_csv_robust(RAW / "cms_outcomes_export.csv")
+
+if not raw_outcomes.empty:
+    so = raw_outcomes.copy()
+    # normalize cols lowercase for searching "stroke"
+    so.columns = [c.strip().lower() for c in so.columns]
+
+    # build mask where ANY target column mentions "stroke"
+    cols_try = [
+        "measure_id","measure id","measure_name","measure name",
+        "condition","condition name","clinical condition","topic","topic name","category"
+    ]
+    mask = None
+    for c in cols_try:
+        if c in so.columns:
+            m = so[c].astype(str).str.lower().str.contains("stroke", na=False)
+            mask = m if mask is None else (mask | m)
+    if mask is None:
+        # fallback: search every text col for 'stroke'
+        import pandas as pd
+        mask = pd.Series(False, index=so.index)
+        for c in so.columns:
+            if so[c].dtype == object:
+                mask = mask | so[c].astype(str).str.lower().str.contains("stroke", na=False)
+
+    stroke_only = so.loc[mask].copy()
+
+    # rename a few useful columns for merging
+    fac_id_col2 = get_first(stroke_only,
+        "facility id","ccn","provider id","cms certification number","facility_id"
+    )
+    meas_name_col = get_first(stroke_only, "measure name","measure_name")
+    score_col     = get_first(stroke_only, "score","rate","mortality rate","death rate")
+    comp_nat_col  = get_first(stroke_only, "compared to national","compared to national rate","compared to national category")
+
+    rename_so = {}
+    if fac_id_col2: rename_so[fac_id_col2] = "facility_id"
+    if meas_name_col: rename_so[meas_name_col] = "stroke_measure_name"
+    if score_col:     rename_so[score_col]     = "stroke_score"
+    if comp_nat_col:  rename_so[comp_nat_col]  = "compared_to_national"
+
+    stroke_only = stroke_only.rename(columns=rename_so)
+
+    keep_so = ["facility_id","stroke_measure_name","stroke_score","compared_to_national"]
+    stroke_only = stroke_only[[c for c in keep_so if c in stroke_only.columns]]
+
+    # collapse to one row per facility_id (take first stroke row for now)
+    if "facility_id" in stroke_only.columns:
+        stroke_summary = (
+            stroke_only
+            .groupby("facility_id", as_index=False)
+            .first()
         )
-        meas_name_col = get_first(so, "measure name", "measure_name")
-        score_col     = get_first(so, "score", "rate", "mortality rate", "death rate")
-        comp_nat_col  = get_first(so, "compared to national", "compared to national rate", "compared to national category")
+    else:
+        stroke_summary = pd.DataFrame()
 
-        rename_so = {}
-        if so_fac_col:    rename_so[so_fac_col]    = "facility_id"
-        if meas_name_col: rename_so[meas_name_col] = "stroke_measure_name"
-        if score_col:     rename_so[score_col]     = "stroke_score"
-        if comp_nat_col:  rename_so[comp_nat_col]  = "compared_to_national"
+    # write cleaned stroke outcomes
+    stroke_summary.to_csv(CLEAN / "cms_stroke_outcomes.csv", index=False)
+else:
+    pd.DataFrame().to_csv(CLEAN / "cms_stroke_outcomes.csv", index=False)
+    stroke_summary = pd.DataFrame()
 
-        so = so.rename(columns=rename_so)
 
-        keep_so = ["facility_id","stroke_measure_name","stroke_score","compared_to_national"]
-        so = so[[c for c in keep_so if c in so.columns]]
+########################
+# 4. Build hospital_profile
+########################
 
-        # collapse to one row per facility_id (take first stroke row for now)
-        if "facility_id" in so.columns:
-            so_summary = (
-                so
-                .groupby("facility_id", as_index=False)
-                .first()
-            )
+clean_hosp = read_csv_robust(CLEAN / "cms_hospital_info.csv")
+clean_stroke = read_csv_robust(CLEAN / "cms_stroke_outcomes.csv")
 
-            if "facility_id" in hospital_profile.columns:
-                hospital_profile = hospital_profile.merge(
-                    so_summary,
-                    on="facility_id",
-                    how="left"
-                )
+hospital_profile = pd.DataFrame()
+
+if not clean_hosp.empty:
+    hospital_profile = clean_hosp.copy()
+    if not clean_stroke.empty and "facility_id" in clean_stroke.columns and "facility_id" in hospital_profile.columns:
+        hospital_profile = hospital_profile.merge(
+            clean_stroke,
+            on="facility_id",
+            how="left"
+        )
 
 hospital_profile.to_csv(CLEAN / "hospital_profile.csv", index=False)
 
 print("Done. Wrote:")
-print(" - data_clean/county_profile.csv  rows:", len(county_profile))
-print(" - data_clean/hospital_profile.csv rows:", len(hospital_profile))
+print(" - data_clean/county_profile.csv   rows:", len(pd.read_csv(CLEAN / "county_profile.csv")))
+print(" - data_clean/cms_hospital_info.csv", "rows:", len(pd.read_csv(CLEAN / "cms_hospital_info.csv")))
+print(" - data_clean/cms_stroke_outcomes.csv", "rows:", len(pd.read_csv(CLEAN / "cms_stroke_outcomes.csv")))
+print(" - data_clean/hospital_profile.csv rows:", len(pd.read_csv(CLEAN / "hospital_profile.csv")))
