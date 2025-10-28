@@ -264,8 +264,21 @@ if not clean_hosp.empty:
 
 hospital_profile.to_csv(CLEAN / "hospital_profile.csv", index=False)
 
+def safe_len(path: Path) -> int:
+    """
+    Try to read a CSV and return number of rows.
+    If it's totally empty (0 bytes or no header), return 0 instead of crashing.
+    """
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return 0
+        df = pd.read_csv(path, dtype=str, low_memory=False)
+        return len(df)
+    except Exception:
+        return 0
+
 print("Done. Wrote:")
-print(" - data_clean/county_profile.csv   rows:", len(pd.read_csv(CLEAN / "county_profile.csv")))
-print(" - data_clean/cms_hospital_info.csv", "rows:", len(pd.read_csv(CLEAN / "cms_hospital_info.csv")))
-print(" - data_clean/cms_stroke_outcomes.csv", "rows:", len(pd.read_csv(CLEAN / "cms_stroke_outcomes.csv")))
-print(" - data_clean/hospital_profile.csv rows:", len(pd.read_csv(CLEAN / "hospital_profile.csv")))
+print(f" - data_clean/county_profile.csv        rows: {safe_len(CLEAN / 'county_profile.csv')}")
+print(f" - data_clean/cms_hospital_info.csv     rows: {safe_len(CLEAN / 'cms_hospital_info.csv')}")
+print(f" - data_clean/cms_stroke_outcomes.csv   rows: {safe_len(CLEAN / 'cms_stroke_outcomes.csv')}")
+print(f" - data_clean/hospital_profile.csv      rows: {safe_len(CLEAN / 'hospital_profile.csv')}")
