@@ -11,7 +11,14 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}  # optional; not required for CSV downloads
+      # Optional future optimization:
+      # You can go to Settings → Variables and add these to hard-pin URLs
+      # if we ever capture them from CMS manually:
+      HOSPITAL_CSV_URL: ${{ vars.HOSPITAL_CSV_URL }}
+      OUTCOMES_CSV_URL: ${{ vars.OUTCOMES_CSV_URL }}
+
+      # CDC/ACS doesn’t require this, but we keep it in case CMS throttles:
+      SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
 
     steps:
       - name: Check out repo
@@ -47,248 +54,158 @@ jobs:
           if [ -n "${SOCRATA_APP_TOKEN}" ]; then
             echo "SOCRATA_APP_TOKEN is set ✅"
           else
-            echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's okay for CSV export)"
+            echo "SOCRATA_APP_TOKEN is NOT set ❌ (that's fine for CDC/ACS)"
           fi
 
-      # ---------- robust resolver: candidates -> header check -> download (with 429/5xx backoff) ----------
-      - name: Resolve & download CMS CSVs (header-validated, with backoff)
+      #################################################################
+      # TRY to grab CMS hospital directory + outcomes.
+      # If CMS rate-limits us or hides URLs, we DO NOT FAIL THE JOB.
+      #################################################################
+      - name: Try CMS fetch (best effort; tolerate failure)
         shell: bash
         run: |
-          set -e
+          set +e  # don't kill the job if this block fails
           python - << 'PY'
-          import json, sys, requests, re, os, time, random
+          import json, os, re, sys, time, random, requests, pathlib
 
-          CAT = "https://data.cms.gov/data.json"
+          RAW = pathlib.Path("data_raw"); RAW.mkdir(parents=True, exist_ok=True)
 
-          # Positive/negative signals (aggressively exclude wrong families)
-          H_POS = ["care compare","hospital","general information","provider data catalog","facility","ccn","provider id","address","city","state","zip"]
-          H_NEG = ["ownership","associate","enrollment","pecos","owner","investor","enforcement","action","deficiency","survey","inspection","mds","minimum data set","dialysis","service area","cost report"]
-          O_POS = ["stroke","ischemic","complications","deaths","mortality","outcome","readmission","measure","hospital","care compare"]
-          O_NEG = ["ownership","associate","enrollment","pecos","enforcement","action","mds","dialysis","service area","cost report","psi","hac"]
-
-          def score_pos(t,keys): t=(t or "").lower(); return sum(3 for k in keys if k in t)
-          def score_neg(t,keys): t=(t or "").lower(); return sum(4 for k in keys if k in t)
-
-          def candidates_for(item, pos, neg, url_hints=None):
-              title=item.get("title","") or ""
-              desc =item.get("description","") or ""
-              base =score_pos(title,pos)+score_pos(desc,pos)-score_neg(title,neg)-score_neg(desc,neg)
-              out=[]
-              for d in item.get("distribution",[]) or []:
-                  if d.get("mediaType")!="text/csv": 
-                      continue
-                  url=d.get("downloadURL") or ""
-                  s=base + score_pos(url,pos) - score_neg(url,neg)
-                  if url_hints:
-                      for rx,bonus in url_hints:
-                          if re.search(rx,url,re.I): s+=bonus
-                  out.append((s,url,title))
-              return out
+          hosp_pin = os.environ.get("HOSPITAL_CSV_URL") or ""
+          out_pin  = os.environ.get("OUTCOMES_CSV_URL") or ""
 
           def http_get(url, headers, timeout=20, retries=4, sleep_base=1.0):
-              for i in range(retries):
-                  try:
-                      r=requests.get(url, timeout=timeout, headers=headers, allow_redirects=True)
-                      if r.status_code in (200,206):
-                          return r
-                      if r.status_code in (429,500,502,503,504):
-                          t=sleep_base*(2**i)+random.uniform(0,0.6)
-                          time.sleep(t); continue
-                      return r
-                  except requests.exceptions.RequestException:
-                      t=sleep_base*(2**i)+random.uniform(0,0.6)
-                      time.sleep(t)
-              return None
-
-          print("Fetching CMS catalog …")
-          r=requests.get(CAT,timeout=60); r.raise_for_status()
-          ds=r.json().get("dataset",[])
-
-          H_HINT=[(r"hospital[-_]general[-_]information",12),(r"care[-_]compare.*hospital",8)]
-          O_HINT=[(r"stroke",15),(r"ischemic",12),(r"complications.*deaths.*hospital",8),(r"mortality.*hospital",6)]
-
-          cand_h=[]; cand_o=[]
-          for it in ds:
-              cand_h += candidates_for(it,H_POS,H_NEG,H_HINT)
-              cand_o += candidates_for(it,O_POS,O_NEG,O_HINT)
-
-          # sort/trim + drop noisy families
-          def drop_bad(cands):
-              out=[]
-              for s,u,t in sorted(cands, key=lambda x: -x[0]):
-                  combo=(t.lower()+" "+u.lower())
-                  if any(b in combo for b in ["service area","dialysis","ownership","enforcement","cost report"]):
-                      continue
-                  out.append((s,u,t))
-              return out
-
-          cand_h = drop_bad(cand_h)[:10]
-          cand_o = [c for c in drop_bad(cand_o) if all(b not in (c[2].lower()+c[1].lower()) for b in ["psi","hac"] )][:16]
-
-          print("Top hospital candidates:", [t for _,_,t in cand_h[:5]])
-          print("Top outcomes candidates:", [t for _,_,t in cand_o[:5]])
-
-          peek_headers = {"User-Agent":"github-actions/etl","Accept":"text/csv, */*","Range":"bytes=0-4095"}
-
-          def first_line(url):
-              r = http_get(url, peek_headers, timeout=15, retries=4, sleep_base=1.0)
-              if not r: return None
-              ct=(r.headers.get("Content-Type","") or "").lower()
-              if ("csv" not in ct) or (not r.content):
-                  return None
+            for i in range(retries):
               try:
-                  return r.content.splitlines()[0].decode("utf-8", errors="replace")
-              except Exception:
-                  try: return r.content.splitlines()[0].decode("latin1","replace")
-                  except Exception: return None
+                r = requests.get(url, timeout=timeout, headers=headers, allow_redirects=True)
+                if r.status_code in (200,206):
+                  return r
+                if r.status_code in (429,500,502,503,504):
+                  t = sleep_base*(2**i) + random.uniform(0,0.6)
+                  time.sleep(t); continue
+                return r
+              except requests.exceptions.RequestException:
+                t = sleep_base*(2**i) + random.uniform(0,0.6)
+                time.sleep(t)
+            return None
 
-          def looks_like_directory(header):
-              h=(header or "").lower()
-              has_id   = any(k in h for k in ["ccn","provider id","facility id"])
-              has_name = any(k in h for k in ["hospital name","provider name","hospital"])
-              has_addr = "address" in h
-              has_loc  = ("city" in h and "state" in h and ("zip" in h or "zip code" in h))
-              return has_id and has_name and has_addr and has_loc
+          def download_full(url, dest_name):
+            if not url:
+              return False
+            headers={"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
+            r=http_get(url, headers, timeout=240, retries=5, sleep_base=1.5)
+            if not r:
+              print(f"[CMS] Could not download {url}")
+              return False
+            ct=(r.headers.get("Content-Type","") or "").lower()
+            if r.status_code!=200 or "csv" not in ct or len(r.content)<200:
+              print(f"[CMS] Bad content for {url} -> {r.status_code}/{ct}, size={len(r.content)}")
+              return False
+            out_path = RAW/dest_name
+            with open(out_path,"wb") as w: w.write(r.content)
+            print(f"[CMS] Wrote {out_path} ({len(r.content)} bytes)")
+            return True
 
-          def looks_like_outcomes(header, title_or_url):
-              h=(header or "").lower()
-              t=(title_or_url or "").lower()
-              if ("stroke" in t) or ("ischemic" in t):
-                  return True
-              return any(k in h for k in ["measure_id","measure id","measure_name","measure name","condition","topic","category"])
+          # If you eventually set repo Variables for HOSPITAL_CSV_URL and OUTCOMES_CSV_URL,
+          # this will just grab those exact files.
+          got_hosp = download_full(hosp_pin, "cms_hospital_info_export.csv")
+          got_out  = download_full(out_pin , "cms_outcomes_export.csv")
 
-          def download_full(url, dest):
-              headers={"User-Agent":"github-actions/etl","Accept":"text/csv, */*"}
-              r=http_get(url, headers, timeout=180, retries=4, sleep_base=1.5)
-              if not r:
-                  raise RuntimeError("download retries exhausted")
-              ct=(r.headers.get("Content-Type","") or "").lower()
-              if r.status_code!=200 or "csv" not in ct or len(r.content)<200:
-                  raise RuntimeError(f"download failed {r.status_code}/{ct}, size={len(r.content)}")
-              with open(dest,"wb") as w: w.write(r.content)
-              print(f"Wrote {dest} ({len(r.content)} bytes)")
-
-          # choose hospital directory
-          hosp_url=hosp_title=hosp_hdr=None
-          for _,url,title in cand_h:
-              line=first_line(url)
-              ok= looks_like_directory(line)
-              print("Try HOSP:", title, "| header ok?", ok, "| url:", url)
-              if ok:
-                  hosp_url=url; hosp_title=title; hosp_hdr=line; break
-          if not hosp_url:
-              print("ERROR: no hospital directory candidate passed header check"); sys.exit(1)
-
-          # choose outcomes (prefer stroke/ischemic in title/url first)
-          stroke_first = [c for c in cand_o if ("stroke" in (c[2].lower()+c[1].lower()) or "ischemic" in (c[2].lower()+c[1].lower()))] \
-                       + [c for c in cand_o if ("stroke" not in (c[2].lower()+c[1].lower()) and "ischemic" not in (c[2].lower()+c[1].lower()))]
-
-          out_url=out_title=out_hdr=None
-          for _,url,title in stroke_first:
-              line=first_line(url)
-              ok= looks_like_outcomes(line, f"{title} {url}")
-              print("Try OUT :", title, "| header ok?", ok, "| url:", url)
-              if ok:
-                  out_url=url; out_title=title; out_hdr=line; break
-          if not out_url:
-              print("ERROR: no outcomes candidate passed header check"); sys.exit(1)
-
-          os.makedirs("data_raw",exist_ok=True)
-          download_full(hosp_url, "data_raw/cms_hospital_info_export.csv")
-          download_full(out_url , "data_raw/cms_outcomes_export.csv")
-
-          with open("data_raw/_cms_download_urls.json","w") as f:
-              json.dump({
-                "hospital_csv":hosp_url,"outcomes_csv":out_url,
-                "hospital_header":hosp_hdr,"outcomes_header":out_hdr,
-                "hospital_title":hosp_title,"outcomes_title":out_title
-              }, f)
-          print("Selected HOSP ✅", hosp_title, "->", hosp_url)
-          print("Header:", hosp_hdr)
-          print("Selected OUT  ✅", out_title, "->", out_url)
-          print("Header:", out_hdr)
+          if not (got_hosp and got_out):
+            print("[CMS] best-effort mode: either we have no pinned URLs yet or CMS blocked us.")
+            print("[CMS] That's okay. We'll keep going with CDC + ACS for county profiles.")
           PY
+          echo "[CMS] fetch step finished (errors ignored)"
+          set -e
 
-      # ---------- copy hospital directory if non-empty & looks right ----------
-      - name: Copy hospital export to clean (directory only)
+      #################################################################
+      # Copy the hospital directory CSV, IF it exists and looks ok.
+      #################################################################
+      - name: Copy hospital export to clean (if valid)
         shell: bash
         run: |
-          set -e
-          if [ ! -s data_raw/cms_hospital_info_export.csv ]; then
-            echo "ERROR: hospital export empty"; exit 1
-          fi
-          header="$(head -n 1 data_raw/cms_hospital_info_export.csv | tr '[:upper:]' '[:lower:]')"
-          echo "Hospital header: $header"
-          if echo "$header" | grep -E -q "ccn|provider id|facility id|hospital name"; then
-            cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
-            echo "Copied hospital directory CSV to data_clean/"
+          # don't fail if missing
+          if [ -s data_raw/cms_hospital_info_export.csv ]; then
+            header="$(head -n 1 data_raw/cms_hospital_info_export.csv | tr '[:upper:]' '[:lower:]')"
+            echo "hospital header -> $header"
+            if echo "$header" | grep -E -q "ccn|facility id|provider id|hospital name"; then
+              cp data_raw/cms_hospital_info_export.csv data_clean/cms_hospital_info.csv
+              echo "copied hospital info to data_clean/cms_hospital_info.csv"
+            else
+              echo "hospital file present but header looked weird, skipping copy"
+            fi
           else
-            echo "ERROR: hospital file doesn't look like the directory table"; exit 1
+            echo "no cms_hospital_info_export.csv found, skipping"
           fi
 
-      # ---------- make stroke-only outcomes (robust encoding) ----------
-      - name: Filter outcomes to stroke-only (robust encoding)
+      #################################################################
+      # Filter CMS outcomes down to stroke-only if we have it.
+      #################################################################
+      - name: Filter outcomes to stroke-only (robust encoding; skip if missing)
         shell: bash
         run: |
-          set -e
-          if [ ! -s data_raw/cms_outcomes_export.csv ]; then
-            echo "ERROR: outcomes export missing or empty"; exit 1
+          if [ -s data_raw/cms_outcomes_export.csv ]; then
+            python - << 'PY'
+            import os
+            from io import StringIO
+            from pathlib import Path
+            import pandas as pd
+
+            src = Path("data_raw/cms_outcomes_export.csv")
+            dst = Path("data_clean/cms_stroke_outcomes.csv")
+            os.makedirs("data_clean", exist_ok=True)
+
+            def read_csv_robust(path: Path) -> pd.DataFrame:
+              for enc in ("utf-8","utf-8-sig","latin1","cp1252"):
+                try:
+                  return pd.read_csv(path, dtype=str, low_memory=False, encoding=enc)
+                except UnicodeDecodeError:
+                  print(f"Decode failed with {enc}; trying next …")
+              with open(path, "rb") as f:
+                text = f.read().decode("utf-8", errors="replace")
+              return pd.read_csv(StringIO(text), dtype=str, low_memory=False)
+
+            df = read_csv_robust(src)
+            if df.empty:
+              print("cms_outcomes_export.csv read as empty, will just create blank stroke file")
+              pd.DataFrame().to_csv(dst, index=False)
+            else:
+              df.columns = [c.strip().lower() for c in df.columns]
+              # stroke filter: look for 'stroke' anywhere in measure columns
+              cols_try = [
+                "measure_id","measure id","measure_name","measure name",
+                "condition","condition name","clinical condition","topic","topic name","category"
+              ]
+              mask = None
+              for c in cols_try:
+                if c in df.columns:
+                  m = df[c].astype(str).str.lower().str.contains("stroke", na=False)
+                  mask = m if mask is None else (mask | m)
+              if mask is None:
+                mask = pd.Series(False, index=df.index)
+                for c in df.columns:
+                  if df[c].dtype == object:
+                    mask = mask | df[c].astype(str).str.lower().str.contains("stroke", na=False)
+
+              df_stk = df.loc[mask].copy()
+              print("rows mentioning stroke:", int(mask.sum()))
+              df_stk.to_csv(dst, index=False)
+            PY
+          else
+            echo "no cms_outcomes_export.csv found, skipping stroke filter"
           fi
-          python - << 'PY'
-          import os
-          from io import StringIO
-          from pathlib import Path
-          import pandas as pd
 
-          src = Path("data_raw/cms_outcomes_export.csv")
-          dst = Path("data_clean/cms_stroke_outcomes.csv")
-          os.makedirs("data_clean", exist_ok=True)
-
-          def read_csv_robust(path: Path) -> pd.DataFrame:
-            for enc in ("utf-8","utf-8-sig","latin1","cp1252"):
-              try:
-                return pd.read_csv(path, dtype=str, low_memory=False, encoding=enc)
-              except UnicodeDecodeError:
-                print(f"Decode failed with {enc}; trying next …")
-            with open(path, "rb") as f:
-              text = f.read().decode("utf-8", errors="replace")
-            return pd.read_csv(StringIO(text), dtype=str, low_memory=False)
-
-          df = read_csv_robust(src)
-          if df.empty:
-            print("ERROR: outcomes export read empty"); raise SystemExit(1)
-
-          df.columns = [c.strip().lower() for c in df.columns]
-          print("Outcome columns (first 30):", df.columns.tolist()[:30])
-
-          # Find stroke rows across likely columns
-          cols_try = [
-            "measure_id","measure id","measure_name","measure name",
-            "condition","condition name","clinical condition","topic","topic name","category"
-          ]
-          mask = None
-          for c in cols_try:
-            if c in df.columns:
-              m = df[c].astype(str).str.lower().str.contains("stroke", na=False)
-              mask = m if mask is None else (mask | m)
-          if mask is None:
-            mask = pd.Series(False, index=df.index)
-            for c in df.columns:
-              if df[c].dtype == object:
-                mask = mask | df[c].astype(str).str.lower().str.contains("stroke", na=False)
-
-          df_stk = df.loc[mask].copy()
-          print("Stroke rows:", int(mask.sum()))
-          df_stk.to_csv(dst, index=False)
-          PY
-
-      # ---------- CDC + ACS + build joins ----------
+      #################################################################
+      # CDC stroke mortality + ACS uninsured (these already work)
+      #################################################################
       - name: Run CDC county
         run: python etl/fetch_cdc_stroke_county.py
 
       - name: Run ACS uninsured
         run: python etl/fetch_acs_uninsured.py
 
+      #################################################################
+      # Build clean tables (this will now ALWAYS produce county_profile.csv)
+      #################################################################
       - name: Build clean tables
         run: python etl/build_clean_tables.py
 
