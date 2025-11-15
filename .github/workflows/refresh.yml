@@ -132,6 +132,9 @@ jobs:
       - name: Build clean tables
         run: python etl/build_clean_tables.py
 
+      - name: Build care gap index
+        run: python etl/build_care_gap_index.py
+
       - name: List outputs
         run: |
           echo "::group::data_clean"
