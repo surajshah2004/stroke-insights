@@ -73,7 +73,7 @@ if not cdc.empty:
     fips_col   = get_first(cdc, "fips", "county_fips", "county_fips_code", "fips code")
     county_col = get_first(cdc, "county name", "county", "county_name")
     state_col  = get_first(cdc, "state", "state_name", "state_abbrev")
-    rate_col   = get_first(cdc, "stroke", "ischemic stroke", "stroke death rate", "mortality", "death rate")
+    rate_col   = get_first(cdc, "data_value", "stroke mortality", "mortality", "death rate")
 
     cdc_tmp = cdc.copy()
     rename_map = {}
@@ -93,11 +93,7 @@ if not acs.empty:
     acs_tmp = acs.copy()
     fips_col2 = get_first(acs_tmp, "fips", "county_fips", "fips code")
     unins_col = None
-    for c in acs_tmp.columns:
-        lc = c.lower()
-        if "uninsur" in lc and ("rate" in lc or "%" in lc):
-            unins_col = c
-            break
+    unins_col = get_first(acs_tmp, "pct_uninsured", "uninsured", "uninsured rate")
 
     rename_map2 = {}
     if fips_col2: rename_map2[fips_col2] = "county_fips"
