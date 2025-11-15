@@ -60,7 +60,7 @@ def get_first(df: pd.DataFrame, *cands):
 
 
 ########################
-# 1. Build county_profile
+# 1. Build county_profile (CDC + ACS)
 ########################
 
 cdc = read_csv_robust(CLEAN / "cdc_stroke_mortality_county.csv")
@@ -144,9 +144,7 @@ if not raw_hosp.empty:
     # attempt to identify expected columns
     hi = raw_hosp.copy()
 
-    fac_id_col = (
-        get_first(hi, "ccn", "cms certification number", "facility id", "provider id")
-    )
+    fac_id_col = get_first(hi, "ccn", "cms certification number", "facility id", "provider id")
     name_col   = get_first(hi, "hospital name", "provider name", "facility name")
     addr_col   = get_first(hi, "address", "address line 1")
     city_col   = get_first(hi, "city", "city/town")
@@ -185,31 +183,45 @@ raw_outcomes = read_csv_robust(RAW / "cms_outcomes_export.csv")
 
 if not raw_outcomes.empty:
     so = raw_outcomes.copy()
-    # normalize cols lowercase for searching "stroke"
+    # normalize cols lowercase for searching
     so.columns = [c.strip().lower() for c in so.columns]
 
-    # build mask where ANY target column mentions "stroke"
+    # 3a. Try to explicitly grab MORT_30_STK by Measure ID
+    measure_id_col = get_first(so, "measure id", "measure_id")
+    mort_mask = None
+    if measure_id_col:
+        mort_mask = so[measure_id_col].astype(str).str.upper().eq("MORT_30_STK")
+
+    # 3b. Build a broader "stroke" text mask as fallback
     cols_try = [
         "measure_id","measure id","measure_name","measure name",
         "condition","condition name","clinical condition","topic","topic name","category"
     ]
-    mask = None
+    stroke_text_mask = None
     for c in cols_try:
         if c in so.columns:
             m = so[c].astype(str).str.lower().str.contains("stroke", na=False)
-            mask = m if mask is None else (mask | m)
-    if mask is None:
-        # fallback: search every text col for 'stroke'
-        import pandas as pd
-        mask = pd.Series(False, index=so.index)
-        for c in so.columns:
-            if so[c].dtype == object:
-                mask = mask | so[c].astype(str).str.lower().str.contains("stroke", na=False)
+            stroke_text_mask = m if stroke_text_mask is None else (stroke_text_mask | m)
+
+    # If we found any MORT_30_STK rows, use those;
+    # otherwise fall back to any "stroke" rows.
+    if mort_mask is not None and mort_mask.any():
+        mask = mort_mask
+    else:
+        if stroke_text_mask is None:
+            # last-resort: search all text columns for "stroke"
+            mask = pd.Series(False, index=so.index)
+            for c in so.columns:
+                if so[c].dtype == object:
+                    mask = mask | so[c].astype(str).str.lower().str.contains("stroke", na=False)
+        else:
+            mask = stroke_text_mask
 
     stroke_only = so.loc[mask].copy()
 
     # rename a few useful columns for merging
-    fac_id_col2 = get_first(stroke_only,
+    fac_id_col2 = get_first(
+        stroke_only,
         "facility id","ccn","provider id","cms certification number","facility_id"
     )
     meas_name_col = get_first(stroke_only, "measure name","measure_name")
@@ -217,7 +229,7 @@ if not raw_outcomes.empty:
     comp_nat_col  = get_first(stroke_only, "compared to national","compared to national rate","compared to national category")
 
     rename_so = {}
-    if fac_id_col2: rename_so[fac_id_col2] = "facility_id"
+    if fac_id_col2:   rename_so[fac_id_col2]   = "facility_id"
     if meas_name_col: rename_so[meas_name_col] = "stroke_measure_name"
     if score_col:     rename_so[score_col]     = "stroke_score"
     if comp_nat_col:  rename_so[comp_nat_col]  = "compared_to_national"
@@ -228,7 +240,7 @@ if not raw_outcomes.empty:
     stroke_only = stroke_only[[c for c in keep_so if c in stroke_only.columns]]
 
     # collapse to one row per facility_id (take first stroke row for now)
-    if "facility_id" in stroke_only.columns:
+    if "facility_id" in stroke_only.columns and not stroke_only.empty:
         stroke_summary = (
             stroke_only
             .groupby("facility_id", as_index=False)
@@ -237,15 +249,18 @@ if not raw_outcomes.empty:
     else:
         stroke_summary = pd.DataFrame()
 
-    # write cleaned stroke outcomes
+    # write cleaned stroke outcomes (new + legacy filename)
     stroke_summary.to_csv(CLEAN / "cms_stroke_outcomes.csv", index=False)
+    stroke_summary.to_csv(CLEAN / "cms_complications_deaths_stroke.csv", index=False)
 else:
-    pd.DataFrame().to_csv(CLEAN / "cms_stroke_outcomes.csv", index=False)
-    stroke_summary = pd.DataFrame()
+    empty_df = pd.DataFrame()
+    empty_df.to_csv(CLEAN / "cms_stroke_outcomes.csv", index=False)
+    empty_df.to_csv(CLEAN / "cms_complications_deaths_stroke.csv", index=False)
+    stroke_summary = empty_df
 
 
 ########################
-# 4. Build hospital_profile
+# 4. Build hospital_profile (hospital info + stroke outcomes)
 ########################
 
 clean_hosp = read_csv_robust(CLEAN / "cms_hospital_info.csv")
@@ -264,6 +279,11 @@ if not clean_hosp.empty:
 
 hospital_profile.to_csv(CLEAN / "hospital_profile.csv", index=False)
 
+
+########################
+# 5. Tiny helper to summarize row counts
+########################
+
 def safe_len(path: Path) -> int:
     """
     Try to read a CSV and return number of rows.
@@ -278,7 +298,8 @@ def safe_len(path: Path) -> int:
         return 0
 
 print("Done. Wrote:")
-print(f" - data_clean/county_profile.csv        rows: {safe_len(CLEAN / 'county_profile.csv')}")
-print(f" - data_clean/cms_hospital_info.csv     rows: {safe_len(CLEAN / 'cms_hospital_info.csv')}")
-print(f" - data_clean/cms_stroke_outcomes.csv   rows: {safe_len(CLEAN / 'cms_stroke_outcomes.csv')}")
-print(f" - data_clean/hospital_profile.csv      rows: {safe_len(CLEAN / 'hospital_profile.csv')}")
+print(f" - data_clean/county_profile.csv                rows: {safe_len(CLEAN / 'county_profile.csv')}")
+print(f" - data_clean/cms_hospital_info.csv             rows: {safe_len(CLEAN / 'cms_hospital_info.csv')}")
+print(f" - data_clean/cms_stroke_outcomes.csv           rows: {safe_len(CLEAN / 'cms_stroke_outcomes.csv')}")
+print(f" - data_clean/cms_complications_deaths_stroke.csv rows: {safe_len(CLEAN / 'cms_complications_deaths_stroke.csv')}")
+print(f" - data_clean/hospital_profile.csv              rows: {safe_len(CLEAN / 'hospital_profile.csv')}")
