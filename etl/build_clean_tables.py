@@ -60,7 +60,7 @@ def get_first(df: pd.DataFrame, *cands):
 
 
 ########################
-# 1. Build county_profile (CDC + ACS)
+# 1. Build county_profile (CDC + ACS, explicit columns)
 ########################
 
 cdc = read_csv_robust(CLEAN / "cdc_stroke_mortality_county.csv")
@@ -68,51 +68,59 @@ acs = read_csv_robust(CLEAN / "acs_uninsured_county.csv")
 
 county_profile = pd.DataFrame()
 
+# ----- CDC: stroke mortality -----
 if not cdc.empty:
-    # identify columns in the CDC stroke mortality file
-    fips_col   = get_first(cdc, "fips", "county_fips", "county_fips_code", "fips code")
-    county_col = get_first(cdc, "county name", "county", "county_name")
-    state_col  = get_first(cdc, "state", "state_name", "state_abbrev")
-    rate_col   = get_first(cdc, "data_value", "stroke mortality", "mortality", "death rate")
+    # Use explicit column names based on your actual file
+    cdc_tmp = cdc[["locationid", "locationdesc", "locationabbr", "data_value"]].copy()
 
-    cdc_tmp = cdc.copy()
-    rename_map = {}
-    if fips_col:   rename_map[fips_col]   = "county_fips"
-    if county_col: rename_map[county_col] = "county_name"
-    if state_col:  rename_map[state_col]  = "state"
-    if rate_col:   rename_map[rate_col]   = "stroke_mortality_rate"
+    cdc_tmp = cdc_tmp.rename(
+        columns={
+            "locationid": "county_fips",
+            "locationdesc": "county_name",
+            "locationabbr": "state",
+            "data_value": "stroke_mortality_rate",
+        }
+    )
 
-    cdc_tmp = cdc_tmp.rename(columns=rename_map)
+    # ensure 5-digit FIPS
+    cdc_tmp["county_fips"] = (
+        cdc_tmp["county_fips"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.zfill(5)
+    )
 
-    keep_cols = ["county_fips", "county_name", "state", "stroke_mortality_rate"]
-    cdc_tmp = cdc_tmp[[c for c in keep_cols if c in cdc_tmp.columns]].drop_duplicates()
+    county_profile = cdc_tmp.drop_duplicates()
 
-    county_profile = cdc_tmp
-
+# ----- ACS: uninsured -----
 if not acs.empty:
-    acs_tmp = acs.copy()
-    fips_col2 = get_first(acs_tmp, "fips", "county_fips", "fips code")
-    unins_col = None
-    unins_col = get_first(acs_tmp, "pct_uninsured", "uninsured", "uninsured rate")
+    # Use explicit columns: fips and pct_uninsured
+    acs_tmp = acs[["fips", "pct_uninsured"]].copy()
 
-    rename_map2 = {}
-    if fips_col2: rename_map2[fips_col2] = "county_fips"
-    if unins_col: rename_map2[unins_col] = "uninsured_rate"
+    acs_tmp = acs_tmp.rename(
+        columns={
+            "fips": "county_fips",
+            "pct_uninsured": "uninsured_rate",
+        }
+    )
 
-    acs_tmp = acs_tmp.rename(columns=rename_map2)
-    acs_tmp = acs_tmp[[c for c in ["county_fips", "uninsured_rate"] if c in acs_tmp.columns]].drop_duplicates()
+    acs_tmp["county_fips"] = (
+        acs_tmp["county_fips"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.zfill(5)
+    )
 
-    if (
-        not county_profile.empty
-        and "county_fips" in county_profile.columns
-        and "county_fips" in acs_tmp.columns
-    ):
-        county_profile = county_profile.merge(acs_tmp, on="county_fips", how="left")
+    acs_tmp = acs_tmp.drop_duplicates()
+
+    if not county_profile.empty:
+        county_profile = county_profile.merge(
+            acs_tmp, on="county_fips", how="left"
+        )
     else:
-        # fallback if CDC was empty
         county_profile = acs_tmp
 
-# compute basic "burden_index" = stroke mortality rate * uninsured %, scaled
+# ----- Compute burden_index if we have both pieces -----
 if (
     not county_profile.empty
     and "stroke_mortality_rate" in county_profile.columns
@@ -121,13 +129,15 @@ if (
     def to_float_series(s):
         return pd.to_numeric(
             s.astype(str).str.replace("%", "", regex=False),
-            errors="coerce"
+            errors="coerce",
         )
+
     smr = to_float_series(county_profile["stroke_mortality_rate"])
     unins = to_float_series(county_profile["uninsured_rate"])
     county_profile["burden_index"] = (smr * unins) / 100.0
 
 county_profile.to_csv(CLEAN / "county_profile.csv", index=False)
+
 
 
 ########################
