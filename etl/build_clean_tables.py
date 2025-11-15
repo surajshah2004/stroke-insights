@@ -60,7 +60,7 @@ def get_first(df: pd.DataFrame, *cands):
 
 
 ########################
-# 1. Build county_profile (CDC + ACS, explicit columns)
+# 1. Build county_profile (CDC + ACS, explicit columns, one row per county)
 ########################
 
 cdc = read_csv_robust(CLEAN / "cdc_stroke_mortality_county.csv")
@@ -68,11 +68,28 @@ acs = read_csv_robust(CLEAN / "acs_uninsured_county.csv")
 
 county_profile = pd.DataFrame()
 
-# ----- CDC: stroke mortality -----
+# ----- CDC: stroke mortality (latest year, Overall / Overall) -----
 if not cdc.empty:
-    # Use explicit column names based on your actual file
-    cdc_tmp = cdc[["locationid", "locationdesc", "locationabbr", "data_value"]].copy()
+    cdc_tmp = cdc.copy()
 
+    # keep only Overall / Overall and latest year
+    # (column names are exactly from your file)
+    cdc_tmp = cdc_tmp[
+        (cdc_tmp["stratification1"] == "Overall") &
+        (cdc_tmp["stratification2"] == "Overall")
+    ].copy()
+
+    # pick latest year present in the file
+    try:
+        cdc_tmp["year_int"] = pd.to_numeric(cdc_tmp["year"], errors="coerce")
+        max_year = int(cdc_tmp["year_int"].max())
+        cdc_tmp = cdc_tmp[cdc_tmp["year_int"] == max_year].copy()
+    except Exception:
+        # if something goes wrong, just keep whatever is there
+        pass
+
+    # now select just the columns we care about
+    cdc_tmp = cdc_tmp[["locationid", "locationdesc", "locationabbr", "data_value"]].copy()
     cdc_tmp = cdc_tmp.rename(
         columns={
             "locationid": "county_fips",
@@ -90,28 +107,27 @@ if not cdc.empty:
         .str.zfill(5)
     )
 
-    county_profile = cdc_tmp.drop_duplicates()
+    # one row per county_fips (if any duplicates remain, keep first)
+    cdc_tmp = cdc_tmp.drop_duplicates(subset=["county_fips"])
+
+    county_profile = cdc_tmp
 
 # ----- ACS: uninsured -----
 if not acs.empty:
-    # Use explicit columns: fips and pct_uninsured
     acs_tmp = acs[["fips", "pct_uninsured"]].copy()
-
     acs_tmp = acs_tmp.rename(
         columns={
             "fips": "county_fips",
             "pct_uninsured": "uninsured_rate",
         }
     )
-
     acs_tmp["county_fips"] = (
         acs_tmp["county_fips"]
         .astype(str)
         .str.replace(".0", "", regex=False)
         .str.zfill(5)
     )
-
-    acs_tmp = acs_tmp.drop_duplicates()
+    acs_tmp = acs_tmp.drop_duplicates(subset=["county_fips"])
 
     if not county_profile.empty:
         county_profile = county_profile.merge(
