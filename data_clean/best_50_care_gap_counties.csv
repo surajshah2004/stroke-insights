@@ -1,8 +1,8 @@
 county_name,state,care_gap_index,hospitals_reporting,stroke_mortality_rate,uninsured_rate,category
 Nassau County,NY,0.0,9.0,49.5,3.9,Best-Aligned Care
-Kenedy County,TX,0.0,0.0,66.6,0.0,Best-Aligned Care
+Kenedy County,TX,0.0,0.0,66.6,0.0,
 Middlesex County,MA,0.0793835702077116,10.0,42.0,2.4,Best-Aligned Care
-Maricao Municipio,PR,0.0812889639576963,0.0,42.2,0.8,Best-Aligned Care
+Maricao Municipio,PR,0.0812889639576963,0.0,42.2,0.8,
 Los Angeles County,CA,0.0999154327531969,48.0,68.0,8.7,Best-Aligned Care
 Monmouth County,NJ,0.1002598407053112,5.0,65.8,5.2,Best-Aligned Care
 Essex County,MA,0.1068687063515604,5.0,51.5,2.8,Best-Aligned Care
@@ -24,7 +24,7 @@ Palm Beach County,FL,0.159727838020195,11.0,87.7,13.2,Best-Aligned Care
 Chittenden County,VT,0.1600169879574339,1.0,52.2,3.3,Best-Aligned Care
 Dutchess County,NY,0.1631547173050465,2.0,42.3,4.2,Best-Aligned Care
 Douglas County,CO,0.1648791786202035,4.0,56.5,3.7,Best-Aligned Care
-Las Marias Municipio,PR,0.1682716397322996,0.0,41.3,2.0,Best-Aligned Care
+Las Marias Municipio,PR,0.1682716397322996,0.0,41.3,2.0,
 Richmond County,NY,0.1710071424839232,2.0,38.3,3.9,Best-Aligned Care
 Baltimore City,MD,0.1731431791889343,10.0,117.4,5.8,Best-Aligned Care
 Carver County,MN,0.1760298062187169,1.0,62.3,2.2,Best-Aligned Care
@@ -35,7 +35,7 @@ Worcester County,MA,0.181999296712106,6.0,44.9,2.6,Best-Aligned Care
 Westchester County,NY,0.1830886430479073,7.0,39.0,5.0,Best-Aligned Care
 Monroe County,NY,0.1836369327996367,4.0,53.8,3.1,Best-Aligned Care
 Ocean County,NJ,0.1842426194111573,4.0,60.2,4.2,Best-Aligned Care
-Calhoun County,IL,0.1861163102842139,0.0,72.8,1.3,Best-Aligned Care
+Calhoun County,IL,0.1861163102842139,0.0,72.8,1.3,
 Bergen County,NJ,0.1861868766950905,5.0,49.7,6.2,Best-Aligned Care
 Ozaukee County,WI,0.1876503933392318,1.0,62.9,2.4,Best-Aligned Care
 Morris County,NJ,0.1886279616465101,3.0,52.9,4.7,Best-Aligned Care
@@ -45,7 +45,7 @@ Linn County,IA,0.1917970422932668,2.0,61.1,3.8,Best-Aligned Care
 Sarasota County,FL,0.1926006503901765,4.0,53.6,10.0,Best-Aligned Care
 Clinton County,NY,0.1928732362689175,1.0,54.3,2.9,Best-Aligned Care
 Hampshire County,MA,0.1934284719377682,1.0,49.9,2.0,Best-Aligned Care
-Mora County,NM,0.1939873954779366,0.0,50.1,2.0,Best-Aligned Care
+Mora County,NM,0.1939873954779366,0.0,50.1,2.0,
 Loudoun County,VA,0.1958524818832447,2.0,47.2,5.1,Best-Aligned Care
 Villalba Municipio,PR,0.196281211449714,0.0,48.5,2.1,Best-Aligned Care
 St. Charles County,MO,0.1991291129426458,4.0,67.6,4.3,Best-Aligned Care
