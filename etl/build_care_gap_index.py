@@ -115,10 +115,18 @@ else:
     )
 
 # ---- Population screening ----
-# If population < 10,000 AND hospitals_reporting == 0 → insufficient data
 merged["population"] = pd.to_numeric(merged["population"], errors="coerce")
+
+# A county is "INSUFFICIENT DATA" if:
+#  - no hospitals are reporting stroke metrics
+#  - AND population is either missing OR < 10,000
+insufficient_mask = (
+    (merged["hospitals_reporting"] == 0)
+    & (merged["population"].isna() | (merged["population"] < 10000))
+)
+
 merged["data_status"] = np.where(
-    (merged["population"] < 10000) & (merged["hospitals_reporting"] == 0),
+    insufficient_mask,
     "INSUFFICIENT DATA",
     "VALID"
 )
