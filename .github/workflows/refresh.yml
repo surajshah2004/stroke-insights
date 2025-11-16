@@ -134,6 +134,9 @@ jobs:
 
       - name: Build care gap index
         run: python etl/build_care_gap_index.py
+        
+      - name: Fetch population data
+        run: python etl/fetch_population_county.py
 
       - name: Generate ranked results
         run: python etl/analyze_care_gap_results.py
