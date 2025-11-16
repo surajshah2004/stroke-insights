@@ -114,16 +114,11 @@ else:
         max_val2 - min_val
     )
 
-# ---- Population screening ----
+# ---- Population screening (stronger rule) ----
+# Do NOT rank counties with population < 1,000 or missing
 merged["population"] = pd.to_numeric(merged["population"], errors="coerce")
 
-# A county is "INSUFFICIENT DATA" if:
-#  - no hospitals are reporting stroke metrics
-#  - AND population is either missing OR < 10,000
-insufficient_mask = (
-    (merged["hospitals_reporting"] == 0)
-    & (merged["population"].isna() | (merged["population"] < 10000))
-)
+insufficient_mask = (merged["population"].isna()) | (merged["population"] < 1000)
 
 merged["data_status"] = np.where(
     insufficient_mask,
