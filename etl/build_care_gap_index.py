@@ -29,6 +29,13 @@ county["uninsured_rate"] = pd.to_numeric(
 )
 county["burden_index"] = pd.to_numeric(county["burden_index"], errors="coerce")
 
+# Drop rows with invalid or extreme mortality values
+county = county[
+    county["stroke_mortality_rate"].notna()
+    & (county["stroke_mortality_rate"] > 0)
+    & (county["stroke_mortality_rate"] < 200)
+].copy()
+
 # ---- Clean hospital stroke scores ----
 hosp["stroke_score_num"] = pd.to_numeric(hosp["stroke_score"], errors="coerce")
 
@@ -38,7 +45,14 @@ perf_map = {
     "No Different Than the National Rate": 1,
     "Worse Than the National Rate": 0,
 }
-hosp["performance_weight"] = hosp["compared_to_national"].map(perf_map)
+hosp["performance_weight"] = hosp["compared_to_national"].map(perf_map).astype(float)
+
+# Penalize missing / "Not Available" reporting
+mask_na_score = hosp["stroke_score_num"].isna()
+mask_not_avail = hosp["stroke_score"].astype(str).str.contains(
+    "Not Available", case=False, na=False
+)
+hosp.loc[mask_na_score | mask_not_avail, "performance_weight"] = -1.0
 
 # ---- Normalize state + county names on BOTH tables ----
 def normalize_name(s: pd.Series) -> pd.Series:
@@ -68,25 +82,63 @@ merged = county.merge(hospital_summary, on=["state_norm", "county_norm"], how="l
 
 # Fill missing supply values
 merged["hospitals_reporting"] = merged["hospitals_reporting"].fillna(0)
-merged["mean_performance_weight"] = merged["mean_performance_weight"].fillna(0)
+# no hospitals / missing → treat as -1 (penalized / unknown)
+merged["mean_performance_weight"] = merged["mean_performance_weight"].fillna(-1.0)
 
 # ---- Compute burden & supply ----
 merged["burden_scaled"] = np.log1p(merged["burden_index"])
-merged["supply_score"] = np.log1p(
-    merged["hospitals_reporting"] * merged["mean_performance_weight"]
+
+# Only positive performance contributes to supply; negative/NA means no effective supply
+effective_supply = (
+    merged["hospitals_reporting"]
+    * merged["mean_performance_weight"].clip(lower=0)
+)
+merged["supply_score"] = np.log1p(effective_supply)
+
+# ---- Care gap index (revised) ----
+max_supply = merged["supply_score"].max()
+if pd.isna(max_supply) or max_supply <= 0:
+    merged["care_gap_index_raw"] = merged["burden_scaled"]
+else:
+    merged["care_gap_index_raw"] = merged["burden_scaled"] * (
+        1 - (merged["supply_score"] / max_supply)
+    )
+
+# Normalize care_gap_index_raw to 0–1
+min_val = merged["care_gap_index_raw"].min()
+max_val2 = merged["care_gap_index_raw"].max()
+if pd.isna(min_val) or pd.isna(max_val2) or max_val2 == min_val:
+    merged["care_gap_index"] = 0.0
+else:
+    merged["care_gap_index"] = (merged["care_gap_index_raw"] - min_val) / (
+        max_val2 - min_val
+    )
+
+# ---- Population screening ----
+# If population < 10,000 AND hospitals_reporting == 0 → insufficient data
+merged["population"] = pd.to_numeric(merged["population"], errors="coerce")
+merged["data_status"] = np.where(
+    (merged["population"] < 10000) & (merged["hospitals_reporting"] == 0),
+    "INSUFFICIENT DATA",
+    "VALID"
 )
 
-# ---- Final care gap index ----
-merged["care_gap_index"] = merged["burden_scaled"] / (1 + merged["supply_score"])
+# ---- Rank only VALID counties ----
+valid = merged[merged["data_status"] == "VALID"].copy()
+valid["national_rank"] = valid["care_gap_index"].rank(method="dense", ascending=False)
+percentiles = valid["national_rank"] / valid["national_rank"].max()
 
-# ---- Rank + categorize ----
-merged["national_rank"] = merged["care_gap_index"].rank(method="dense", ascending=False)
-percentiles = merged["national_rank"] / merged["national_rank"].max()
-
-merged["category"] = pd.cut(
+valid["category"] = pd.cut(
     percentiles,
     bins=[0, 0.1, 0.3, 0.6, 0.9, 1.0],
     labels=["Critical Gap", "High Gap", "Moderate Gap", "Low Gap", "Best-Aligned Care"],
+)
+
+# Merge ranking + category back into full dataset (including insufficient-data counties)
+merged = merged.merge(
+    valid[["county_fips", "national_rank", "category"]],
+    on="county_fips",
+    how="left"
 )
 
 # ---- Save ----
