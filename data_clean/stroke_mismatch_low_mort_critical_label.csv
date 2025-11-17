@@ -1,0 +1,4 @@
+county_fips,county_name,state,population,stroke_mortality_rate,uninsured_rate,hospitals_reporting,mean_performance_weight,care_gap_index,category,data_status
+02164,Lake and Peninsula,AK,1007.0,44.4,31.4,0.0,-1.0,0.7557060893892875,Critical Gap,VALID
+46137,Ziebach County,SD,2410.0,52.1,25.9,0.0,-1.0,0.7472044745565416,Critical Gap,VALID
+30035,Glacier County,MT,13713.0,52.6,29.3,0.0,-1.0,0.7819339364582906,Critical Gap,VALID

@@ -1,0 +1,6 @@
+county_fips,county_name,state,population,stroke_mortality_rate,uninsured_rate,hospitals_reporting,mean_performance_weight,care_gap_index,category,data_status
+06079,San Luis Obispo County,CA,281486.0,118.7,5.8,3.0,1.0,0.2651744082166717,Best-Aligned Care,VALID
+24510,Baltimore City,MD,577193.0,117.4,5.8,10.0,0.5,0.1731431791889343,Best-Aligned Care,VALID
+12011,Broward County,FL,1946127.0,114.0,13.3,12.0,0.3888888888888889,0.2517470274873556,Best-Aligned Care,VALID
+12127,Volusia County,FL,568229.0,108.8,11.0,5.0,0.6666666666666666,0.3067250273290973,Best-Aligned Care,VALID
+21193,Perry County,KY,27847.0,107.8,3.0,1.0,1.0,0.2943161114172164,Best-Aligned Care,VALID
