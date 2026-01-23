@@ -251,18 +251,18 @@ color_map = {
 
 # Build hover_data dynamically (only include columns that exist)
 hover_data = {
-    "state": True,
-    "population": ":,",
-    "hospitals_reporting": True,
-    "stroke_mortality_rate": ":.1f",
-    "uninsured_rate": ":.1f",
     "burden_index": ":.3f",
     "supply_score": ":.3f",
-    "care_gap_index": ":.3f",
     "SCAI": ":.3f",
     "access_rank": ":.0f",
+    "stroke_mortality_rate": ":.1f",
+    "uninsured_rate": ":.1f",
+    "population": ":,",
+    "hospitals_reporting": True,
+    "care_gap_index": ":.3f",
     "display_category": True,
     "data_status": True,
+    "state": True,
     "county_fips": False,
 }
 
