@@ -207,18 +207,17 @@ CATEGORY_ORDER = [
 
 if {"display_category", "population"} <= set(filtered.columns) and filtered["population"].notna().any():
     pop_summary = (
-        filtered.dropna(subset=["population"])
-        .groupby("display_category", observed=True)
-        .agg(
-            total_population=("population", "sum"),
-            mean_county_population=("population", "mean"),
-            std_county_population=("population", "std"),
-            min_county_population=("population", "min"),
-            max_county_population=("population", "max"),
-            county_count=("population", "count"),
-        )
-        .reset_index()
+    filtered.dropna(subset=["population"])
+    .groupby("display_category", observed=True)
+    .agg(
+        total_population=("population", "sum"),
+        mean_county_population=("population", "mean"),
+        std_county_population=("population", "std"),
+        min_county_population=("population", "min"),
+        max_county_population=("population", "max"),
     )
+    .reset_index()
+)
 
     total_pop = pop_summary["total_population"].sum()
     pop_summary["share_of_population_percent"] = (
