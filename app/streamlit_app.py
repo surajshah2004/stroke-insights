@@ -208,14 +208,21 @@ CATEGORY_ORDER = [
 if {"display_category", "population"} <= set(filtered.columns) and filtered["population"].notna().any():
     pop_summary = (
         filtered.dropna(subset=["population"])
-        .groupby("display_category", observed=True)["population"]
-        .sum()
+        .groupby("display_category", observed=True)
+        .agg(
+            total_population=("population", "sum"),
+            mean_county_population=("population", "mean"),
+            std_county_population=("population", "std"),
+            min_county_population=("population", "min"),
+            max_county_population=("population", "max"),
+            county_count=("population", "count"),
+        )
         .reset_index()
     )
 
-    total_pop = pop_summary["population"].sum()
+    total_pop = pop_summary["total_population"].sum()
     pop_summary["share_of_population_percent"] = (
-        (pop_summary["population"] / total_pop) * 100.0 if total_pop else 0.0
+        (pop_summary["total_population"] / total_pop) * 100.0 if total_pop else 0.0
     )
 
     # Order categories conceptually (best -> worst), not by population size
@@ -226,13 +233,41 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
     )
     pop_summary = pop_summary.sort_values("display_category")
 
-    pop_summary["population"] = pop_summary["population"].astype(int)
+    # Clean formatting for display
+    int_cols = [
+        "total_population",
+        "mean_county_population",
+        "std_county_population",
+        "min_county_population",
+        "max_county_population",
+        "county_count",
+    ]
+    for c in int_cols:
+        if c in pop_summary.columns:
+            pop_summary[c] = pop_summary[c].fillna(0).round(0).astype(int)
+
     pop_summary["share_of_population_percent"] = pop_summary["share_of_population_percent"].round(2)
 
-    st.dataframe(pop_summary, use_container_width=True, hide_index=True)
+    # Optional: nicer column names in the displayed table
+    pop_summary_display = pop_summary.rename(
+        columns={
+            "display_category": "Category",
+            "total_population": "Total population",
+            "share_of_population_percent": "Share of population (%)",
+            "mean_county_population": "Mean county population",
+            "std_county_population": "SD county population",
+            "min_county_population": "Min county population",
+            "max_county_population": "Max county population",
+            "county_count": "County count",
+        }
+    )
+
+    st.dataframe(pop_summary_display, use_container_width=True, hide_index=True)
     st.caption(
         "Categories are ordered from best to worst stroke care access. "
-        "Shares are computed among counties with non-missing population in the current filtered view."
+        "Total population reflects the sum across counties in each category; "
+        "mean, SD, and min/max describe the distribution of county populations within each category "
+        "in the current filtered view."
     )
 else:
     st.info("Population summary is unavailable because population is missing in the current view.")
