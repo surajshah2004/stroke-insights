@@ -196,6 +196,15 @@ st.sidebar.write(f"Showing **{len(filtered)}** counties")
 # -----------------------------
 st.subheader("Population by care gap category")
 
+CATEGORY_ORDER = [
+    "Best-Aligned Care",
+    "Low Gap",
+    "Moderate Gap",
+    "High Gap",
+    "Critical Gap",
+    "No / Insufficient Data",
+]
+
 if {"display_category", "population"} <= set(filtered.columns) and filtered["population"].notna().any():
     pop_summary = (
         filtered.dropna(subset=["population"])
@@ -209,12 +218,22 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
         (pop_summary["population"] / total_pop) * 100.0 if total_pop else 0.0
     )
 
-    pop_summary = pop_summary.sort_values("population", ascending=False)
+    # Order categories conceptually (best -> worst), not by population size
+    pop_summary["display_category"] = pd.Categorical(
+        pop_summary["display_category"],
+        categories=CATEGORY_ORDER,
+        ordered=True,
+    )
+    pop_summary = pop_summary.sort_values("display_category")
+
     pop_summary["population"] = pop_summary["population"].astype(int)
     pop_summary["share_of_population_percent"] = pop_summary["share_of_population_percent"].round(2)
 
     st.dataframe(pop_summary, use_container_width=True, hide_index=True)
-    st.caption("Shares are computed among counties with non-missing population in the current filtered view.")
+    st.caption(
+        "Categories are ordered from best to worst stroke care access. "
+        "Shares are computed among counties with non-missing population in the current filtered view."
+    )
 else:
     st.info("Population summary is unavailable because population is missing in the current view.")
 
