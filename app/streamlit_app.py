@@ -168,11 +168,10 @@ def make_quintile_category(
     data_status_col: str = "data_status",
 ) -> pd.Series:
     """
-    Returns a categorical Series with CATEGORY_ORDER labels based on quintiles of `metric_col`.
-    - Applies "not insufficient" + metric-not-null rule; everything else => "No / Insufficient Data"
-    - Uses the same 5-category scheme as your SCAI display_category.
-    - Inverts labels when higher_is_better=False (e.g., burden where higher = worse).
-    - If too many ties / too few unique values, bins by rank(method="first") (still percentile-based).
+    Robust quintile binning using percentile rank (works even with many ties).
+    - Valid = data_status does NOT contain "INSUFFICIENT" and metric is not null
+    - Outputs CATEGORY_ORDER labels
+    - If higher_is_better=False, inverts (e.g., burden where higher = worse)
     """
     out = pd.Series("No / Insufficient Data", index=df.index, dtype="object")
 
@@ -186,36 +185,22 @@ def make_quintile_category(
         .str.strip()
         .str.upper()
     )
-
     is_valid = ~status.str.contains("INSUFFICIENT", na=False)
 
     valid_mask = is_valid & df[metric_col].notna()
-    valid = df.loc[valid_mask, metric_col].copy()
-
-    if valid.empty:
+    if valid_mask.sum() == 0:
         return out
 
-    quintile_labels_low_to_high = [
-        "Critical Gap",
-        "High Gap",
-        "Moderate Gap",
-        "Low Gap",
-        "Best-Aligned Care",
-    ]
-
-    series_to_bin = valid
-    if valid.nunique(dropna=True) < 5:
-        series_to_bin = valid.rank(method="first")
-
-    try:
-        binned = pd.qcut(
-            series_to_bin,
-            q=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
-            labels=quintile_labels_low_to_high,
-            duplicates="drop",
-        ).astype(str)
-    except ValueError:
+    s = pd.to_numeric(df.loc[valid_mask, metric_col], errors="coerce").dropna()
+    if s.empty:
         return out
+
+    # Percentile rank in (0, 1]; average handles ties
+    pct = s.rank(method="average", pct=True)
+
+    bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    labels_low_to_high = ["Critical Gap", "High Gap", "Moderate Gap", "Low Gap", "Best-Aligned Care"]
+    cat = pd.cut(pct, bins=bins, labels=labels_low_to_high, include_lowest=True, right=True)
 
     if not higher_is_better:
         invert_map = {
@@ -225,9 +210,11 @@ def make_quintile_category(
             "Low Gap": "High Gap",
             "Best-Aligned Care": "Critical Gap",
         }
-        binned = binned.map(invert_map)
+        cat = cat.astype(str).map(invert_map)
+    else:
+        cat = cat.astype(str)
 
-    out.loc[valid_mask] = binned
+    out.loc[s.index] = cat
     return out
 
 
@@ -405,6 +392,9 @@ filtered["map_category"] = make_quintile_category(
     metric_col=map_metric_col,
     higher_is_better=higher_is_better,
 )
+
+# Strip just in case (prevents label mismatch)
+filtered["map_category"] = filtered["map_category"].astype(str).str.strip()
 
 filtered["map_category"] = pd.Categorical(
     filtered["map_category"],
