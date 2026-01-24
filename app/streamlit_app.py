@@ -57,8 +57,37 @@ def load_county_data() -> pd.DataFrame:
     if "county_fips" in df.columns:
         df["county_fips"] = df["county_fips"].astype(str).str.zfill(5)
 
-    # Make key fields numeric if present
-    numeric_cols = [
+    # Default data_status then normalize (so VALID/valid/Ok all behave)
+    if "data_status" not in df.columns:
+        df["data_status"] = "VALID"
+
+    df["data_status"] = (
+        df["data_status"]
+        .fillna("VALID")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # Helper to coerce numeric columns more robustly (handles commas, percent signs, etc.)
+    def coerce_numeric(col: str) -> None:
+        if col not in df.columns:
+            return
+
+        if pd.api.types.is_numeric_dtype(df[col]):
+            return
+
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False)
+            .str.strip()
+        )
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Coerce relevant numeric columns
+    for col in [
         "care_gap_index",
         "population",
         "hospitals_reporting",
@@ -67,14 +96,8 @@ def load_county_data() -> pd.DataFrame:
         "burden_index",
         "supply_score",
         "SCAI",
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Default data_status
-    if "data_status" not in df.columns:
-        df["data_status"] = "VALID"
+    ]:
+        coerce_numeric(col)
 
     # Normalize uninsured_rate to percent if it looks like a fraction
     if "uninsured_rate" in df.columns:
@@ -109,8 +132,11 @@ def load_county_data() -> pd.DataFrame:
     # Base SCAI category column (used for filtering + tables)
     df["display_category"] = "No / Insufficient Data"
 
+    # Treat anything containing "INSUFFICIENT" as not valid; everything else counts as valid
+    is_valid = ~df["data_status"].str.contains("INSUFFICIENT", na=False)
+
     valid_mask = (
-        (df["data_status"] == "VALID")
+        is_valid
         & df.get("care_gap_index", pd.Series(index=df.index, dtype=float)).notna()
         & df.get("SCAI", pd.Series(index=df.index, dtype=float)).notna()
     )
@@ -143,22 +169,27 @@ def make_quintile_category(
 ) -> pd.Series:
     """
     Returns a categorical Series with CATEGORY_ORDER labels based on quintiles of `metric_col`.
-
-    Rules:
-    - Applies VALID + metric-not-null rule; everything else => "No / Insufficient Data"
-    - Uses the same 5-category scheme as your SCAI display_category (quintiles)
-    - Inverts labels when higher_is_better=False (e.g., burden where higher = worse)
-
-    Robustness:
-    - If `metric_col` has too many ties / too few unique values for qcut,
-      fall back to binning on rank(method="first") so we still get quintiles.
+    - Applies "not insufficient" + metric-not-null rule; everything else => "No / Insufficient Data"
+    - Uses the same 5-category scheme as your SCAI display_category.
+    - Inverts labels when higher_is_better=False (e.g., burden where higher = worse).
+    - If too many ties / too few unique values, bins by rank(method="first") (still percentile-based).
     """
     out = pd.Series("No / Insufficient Data", index=df.index, dtype="object")
 
     if metric_col not in df.columns:
         return out
 
-    valid_mask = (df.get(data_status_col, "VALID") == "VALID") & df[metric_col].notna()
+    status = (
+        df.get(data_status_col, "VALID")
+        .fillna("VALID")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    is_valid = ~status.str.contains("INSUFFICIENT", na=False)
+
+    valid_mask = is_valid & df[metric_col].notna()
     valid = df.loc[valid_mask, metric_col].copy()
 
     if valid.empty:
@@ -172,8 +203,6 @@ def make_quintile_category(
         "Best-Aligned Care",
     ]
 
-    # If there are too many ties (or values are nearly constant), qcut can fail.
-    # In that case, bin by rank (still percentile-based).
     series_to_bin = valid
     if valid.nunique(dropna=True) < 5:
         series_to_bin = valid.rank(method="first")
@@ -224,6 +253,7 @@ df = load_county_data()
 # -----------------------------
 st.sidebar.header("Filters")
 
+# Map toggle (show only options that exist)
 metric_options = [("SCAI", "SCAI")]
 if "supply_score" in df.columns:
     metric_options.append(("Supply score", "supply_score"))
@@ -240,6 +270,7 @@ map_metric_label = st.sidebar.radio(
 )
 map_metric_col = metric_label_to_col[map_metric_label]
 
+# State filter
 states = sorted(df["state"].dropna().unique()) if "state" in df.columns else []
 state_filter = st.sidebar.multiselect(
     "State(s)",
@@ -248,6 +279,7 @@ state_filter = st.sidebar.multiselect(
     help="Limit the map and table to selected states.",
 )
 
+# Category filter (this filter remains based on SCAI categories to keep behavior consistent)
 available_categories = (
     sorted(df["display_category"].dropna().unique().tolist())
     if "display_category" in df.columns
@@ -260,6 +292,7 @@ category_filter = st.sidebar.multiselect(
     help="Filters remain based on the original SCAI-based category, even if you toggle the map metric.",
 )
 
+# Population slider
 if "population" in df.columns and df["population"].notna().any():
     pop_max = int(df["population"].max(skipna=True))
 else:
@@ -273,6 +306,7 @@ pop_range = st.sidebar.slider(
     step=1000 if pop_max >= 1000 else 1,
 )
 
+# Apply filters
 filtered = df.copy()
 
 if state_filter and "state" in filtered.columns:
@@ -321,6 +355,7 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
     )
     pop_summary = pop_summary.sort_values("display_category")
 
+    # Format columns
     int_cols = [
         "total_population",
         "mean_county_population",
@@ -376,6 +411,26 @@ filtered["map_category"] = pd.Categorical(
     categories=CATEGORY_ORDER,
     ordered=True,
 )
+
+# -----------------------------
+# Debug panel (helps diagnose all-gray map)
+# -----------------------------
+with st.expander("Debug: map metric coverage"):
+    st.write("Map metric:", map_metric_label, "→", map_metric_col)
+    if map_metric_col in filtered.columns:
+        st.write("Non-null metric values:", int(filtered[map_metric_col].notna().sum()))
+        st.write("Unique metric values:", int(filtered[map_metric_col].nunique(dropna=True)))
+        st.write("Metric min / max:", filtered[map_metric_col].min(), filtered[map_metric_col].max())
+    else:
+        st.write("Metric column missing in filtered data.")
+
+    if "data_status" in filtered.columns:
+        st.write("Top data_status values:")
+        st.write(filtered["data_status"].value_counts(dropna=False).head(10))
+
+    if "map_category" in filtered.columns:
+        st.write("Map category counts:")
+        st.write(filtered["map_category"].value_counts(dropna=False))
 
 
 # -----------------------------
