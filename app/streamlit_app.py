@@ -143,9 +143,15 @@ def make_quintile_category(
 ) -> pd.Series:
     """
     Returns a categorical Series with CATEGORY_ORDER labels based on quintiles of `metric_col`.
+
+    Rules:
     - Applies VALID + metric-not-null rule; everything else => "No / Insufficient Data"
-    - Uses the same 5-category scheme as your SCAI display_category.
-    - Inverts labels when higher_is_better=False (e.g., burden where higher = worse).
+    - Uses the same 5-category scheme as your SCAI display_category (quintiles)
+    - Inverts labels when higher_is_better=False (e.g., burden where higher = worse)
+
+    Robustness:
+    - If `metric_col` has too many ties / too few unique values for qcut,
+      fall back to binning on rank(method="first") so we still get quintiles.
     """
     out = pd.Series("No / Insufficient Data", index=df.index, dtype="object")
 
@@ -158,7 +164,6 @@ def make_quintile_category(
     if valid.empty:
         return out
 
-    # Quintile labels (low -> high). We assign then invert if needed.
     quintile_labels_low_to_high = [
         "Critical Gap",
         "High Gap",
@@ -167,21 +172,22 @@ def make_quintile_category(
         "Best-Aligned Care",
     ]
 
-    # Compute quintiles (rank-based bins)
+    # If there are too many ties (or values are nearly constant), qcut can fail.
+    # In that case, bin by rank (still percentile-based).
+    series_to_bin = valid
+    if valid.nunique(dropna=True) < 5:
+        series_to_bin = valid.rank(method="first")
+
     try:
         binned = pd.qcut(
-            valid,
+            series_to_bin,
             q=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
             labels=quintile_labels_low_to_high,
             duplicates="drop",
         ).astype(str)
     except ValueError:
-        # If not enough unique values for qcut, keep insufficient
         return out
 
-    # If higher is better, we want high values => Best-Aligned.
-    # Our current labels assign low values => Critical, high => Best, which matches higher_is_better=True.
-    # If higher is worse (burden), invert mapping so low burden => Best, high burden => Critical.
     if not higher_is_better:
         invert_map = {
             "Critical Gap": "Best-Aligned Care",
@@ -218,7 +224,6 @@ df = load_county_data()
 # -----------------------------
 st.sidebar.header("Filters")
 
-# Map toggle (show only options that exist)
 metric_options = [("SCAI", "SCAI")]
 if "supply_score" in df.columns:
     metric_options.append(("Supply score", "supply_score"))
@@ -235,7 +240,6 @@ map_metric_label = st.sidebar.radio(
 )
 map_metric_col = metric_label_to_col[map_metric_label]
 
-# State filter
 states = sorted(df["state"].dropna().unique()) if "state" in df.columns else []
 state_filter = st.sidebar.multiselect(
     "State(s)",
@@ -244,7 +248,6 @@ state_filter = st.sidebar.multiselect(
     help="Limit the map and table to selected states.",
 )
 
-# Category filter (this filter remains based on SCAI categories to keep behavior consistent)
 available_categories = (
     sorted(df["display_category"].dropna().unique().tolist())
     if "display_category" in df.columns
@@ -257,7 +260,6 @@ category_filter = st.sidebar.multiselect(
     help="Filters remain based on the original SCAI-based category, even if you toggle the map metric.",
 )
 
-# Population slider
 if "population" in df.columns and df["population"].notna().any():
     pop_max = int(df["population"].max(skipna=True))
 else:
@@ -271,7 +273,6 @@ pop_range = st.sidebar.slider(
     step=1000 if pop_max >= 1000 else 1,
 )
 
-# Apply filters
 filtered = df.copy()
 
 if state_filter and "state" in filtered.columns:
@@ -320,7 +321,6 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
     )
     pop_summary = pop_summary.sort_values("display_category")
 
-    # Format columns
     int_cols = [
         "total_population",
         "mean_county_population",
@@ -360,10 +360,6 @@ else:
 # -----------------------------
 # Map categories (toggle-controlled)
 # -----------------------------
-# Determine direction
-# - SCAI: higher better
-# - Supply score: assume higher better
-# - Burden index: higher worse (invert)
 higher_is_better = True
 if map_metric_col == "burden_index":
     higher_is_better = False
@@ -375,7 +371,6 @@ filtered["map_category"] = make_quintile_category(
     higher_is_better=higher_is_better,
 )
 
-# Enforce ordered categories for consistent legend ordering
 filtered["map_category"] = pd.Categorical(
     filtered["map_category"],
     categories=CATEGORY_ORDER,
