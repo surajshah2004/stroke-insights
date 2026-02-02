@@ -47,6 +47,12 @@ DISPLAY_NAMES = {
 
 
 # -----------------------------
+# Publication link (set after acceptance)
+# -----------------------------
+PAPER_URL = None  # e.g., "https://doi.org/10.xxxx/xxxx" or the final Stroke landing page
+
+
+# -----------------------------
 # Load + preprocess
 # -----------------------------
 @st.cache_data
@@ -57,7 +63,7 @@ def load_county_data() -> pd.DataFrame:
     if "county_fips" in df.columns:
         df["county_fips"] = df["county_fips"].astype(str).str.zfill(5)
 
-    # Default data_status then normalize (so VALID/valid/Ok all behave)
+    # Default data_status then normalize
     if "data_status" not in df.columns:
         df["data_status"] = "VALID"
 
@@ -69,7 +75,7 @@ def load_county_data() -> pd.DataFrame:
         .str.upper()
     )
 
-    # Helper to coerce numeric columns more robustly (handles commas, percent signs, etc.)
+    # Helper to coerce numeric columns more robustly
     def coerce_numeric(col: str) -> None:
         if col not in df.columns:
             return
@@ -199,8 +205,16 @@ def make_quintile_category(
     pct = s.rank(method="average", pct=True)
 
     bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    labels_low_to_high = ["Critical Gap", "High Gap", "Moderate Gap", "Low Gap", "Best-Aligned Care"]
-    cat = pd.cut(pct, bins=bins, labels=labels_low_to_high, include_lowest=True, right=True)
+    labels_low_to_high = [
+        "Critical Gap",
+        "High Gap",
+        "Moderate Gap",
+        "Low Gap",
+        "Best-Aligned Care",
+    ]
+    cat = pd.cut(
+        pct, bins=bins, labels=labels_low_to_high, include_lowest=True, right=True
+    )
 
     if not higher_is_better:
         invert_map = {
@@ -228,6 +242,24 @@ st.caption(
     "County-level Stroke Care Access Index (SCAI) combining stroke mortality (deaths per 100,000), "
     "uninsured rate (percent), hospital supply, and performance."
 )
+
+# -----------------------------
+# PI-requested links (top of page)
+# -----------------------------
+st.markdown("**Clinical resources (UCSF):**")
+st.markdown(
+    "- [UCSF Cerebrovascular Neurosurgery Clinic](https://www.ucsfhealth.org/clinics/cerebrovascular-neurosurgery-clinic)"
+)
+st.markdown(
+    "- [UCSF Comprehensive Stroke Center](https://www.ucsfhealth.org/list-of-clinics/comprehensive-stroke-center)"
+)
+
+st.markdown("**Publication:**")
+if PAPER_URL:
+    st.markdown(f"- [Stroke publication link]({PAPER_URL})")
+else:
+    st.markdown("- _Link will be added upon acceptance._")
+
 
 # -----------------------------
 # Load data
@@ -266,7 +298,7 @@ state_filter = st.sidebar.multiselect(
     help="Limit the map and table to selected states.",
 )
 
-# Category filter (this filter remains based on SCAI categories to keep behavior consistent)
+# Category filter (SCAI-based)
 available_categories = (
     sorted(df["display_category"].dropna().unique().tolist())
     if "display_category" in df.columns
@@ -342,7 +374,6 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
     )
     pop_summary = pop_summary.sort_values("display_category")
 
-    # Format columns
     int_cols = [
         "total_population",
         "mean_county_population",
@@ -393,7 +424,6 @@ filtered["map_category"] = make_quintile_category(
     higher_is_better=higher_is_better,
 )
 
-# Strip just in case (prevents label mismatch)
 filtered["map_category"] = filtered["map_category"].astype(str).str.strip()
 
 filtered["map_category"] = pd.Categorical(
@@ -402,8 +432,9 @@ filtered["map_category"] = pd.Categorical(
     ordered=True,
 )
 
+
 # -----------------------------
-# Debug panel (helps diagnose all-gray map)
+# Debug panel
 # -----------------------------
 with st.expander("Debug: map metric coverage"):
     st.write("Map metric:", map_metric_label, "→", map_metric_col)
@@ -465,7 +496,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 
 # -----------------------------
-# County table (still shows SCAI category; map category is also shown)
+# County table
 # -----------------------------
 st.subheader("County-level details")
 
