@@ -1,25 +1,33 @@
 # etl/fetch_acs_uninsured.py
-import requests, pandas as pd, pathlib
+import requests, pandas as pd, pathlib, sys
 
-YEAR = "2023"  # latest 5-year at time of writing
+YEAR = "2023"
 BASE = f"https://api.census.gov/data/{YEAR}/acs/acs5/subject"
-VARS = ["NAME","S2701_C05_001E"]  # Percent Uninsured, civilian noninstitutionalized pop
-
-OUT = pathlib.Path("data_clean/acs_uninsured_county.csv")
+# S2701_C04_001E = Percent uninsured (column 4 = "No health insurance coverage")
+# S2701_C05_001E was renamed/restructured in recent vintages; C04 is the safe pick
+VARS = ["NAME", "S2701_C04_001E"]
+OUT  = pathlib.Path("data_clean/acs_uninsured_county.csv")
 
 def main():
     OUT.parent.mkdir(exist_ok=True)
     params = {"get": ",".join(VARS), "for": "county:*"}
+
     r = requests.get(BASE, params=params, timeout=60)
+
+    # Surface the raw response before trying to parse it
+    if not r.ok or "application/json" not in r.headers.get("Content-Type", ""):
+        print(f"[ERROR] Status {r.status_code}  Content-Type: {r.headers.get('Content-Type')}")
+        print(f"[ERROR] Response body:\n{r.text[:1000]}")
+        sys.exit(1)
+
     r.raise_for_status()
     rows = r.json()
+
     df = pd.DataFrame(rows[1:], columns=rows[0])
-    # Make a single county FIPS code for easy joins later
-    df["state_fips"] = df["state"]
-    df["county_fips"] = df["county"]
-    df["fips"] = df["state_fips"].str.zfill(2) + df["county_fips"].str.zfill(3)
-    df.rename(columns={"S2701_C05_001E":"pct_uninsured"}, inplace=True)
+    df["fips"] = df["state"].str.zfill(2) + df["county"].str.zfill(3)
+    df.rename(columns={"S2701_C04_001E": "pct_uninsured"}, inplace=True)
     df.to_csv(OUT, index=False)
+    print(f"[OK] Wrote {len(df)} rows to {OUT}")
 
 if __name__ == "__main__":
     main()
