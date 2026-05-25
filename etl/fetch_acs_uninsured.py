@@ -1,20 +1,22 @@
 # etl/fetch_acs_uninsured.py
-import requests, pandas as pd, pathlib, sys
+import requests, pandas as pd, pathlib, sys, os
 
 YEAR = "2023"
 BASE = f"https://api.census.gov/data/{YEAR}/acs/acs5/subject"
-# S2701_C04_001E = Percent uninsured (column 4 = "No health insurance coverage")
-# S2701_C05_001E was renamed/restructured in recent vintages; C04 is the safe pick
 VARS = ["NAME", "S2701_C04_001E"]
 OUT  = pathlib.Path("data_clean/acs_uninsured_county.csv")
 
 def main():
     OUT.parent.mkdir(exist_ok=True)
-    params = {"get": ",".join(VARS), "for": "county:*"}
 
+    api_key = os.environ.get("CENSUS_API_KEY")
+    if not api_key:
+        print("[ERROR] CENSUS_API_KEY environment variable not set")
+        sys.exit(1)
+
+    params = {"get": ",".join(VARS), "for": "county:*", "key": api_key}
     r = requests.get(BASE, params=params, timeout=60)
 
-    # Surface the raw response before trying to parse it
     if not r.ok or "application/json" not in r.headers.get("Content-Type", ""):
         print(f"[ERROR] Status {r.status_code}  Content-Type: {r.headers.get('Content-Type')}")
         print(f"[ERROR] Response body:\n{r.text[:1000]}")
