@@ -11,13 +11,10 @@ jobs:
   run-etl:
     runs-on: ubuntu-latest
     env:
-      # Optional future optimization:
-      # If you add these in Settings → Variables, we will use them directly
-      # instead of trying to discover CMS URLs.
       HOSPITAL_CSV_URL: ${{ vars.HOSPITAL_CSV_URL }}
       OUTCOMES_CSV_URL: ${{ vars.OUTCOMES_CSV_URL }}
-
       SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+      CENSUS_API_KEY: ${{ secrets.CENSUS_API_KEY }}
 
     steps:
       - name: Check out repo
@@ -58,8 +55,6 @@ jobs:
 
       #################################################################
       # Try CMS fetch (best effort, do not fail the run if CMS doesn't cooperate).
-      # If you later set HOSPITAL_CSV_URL / OUTCOMES_CSV_URL as repo Variables,
-      # this step will download those exact CSVs automatically.
       #################################################################
       - name: Try CMS fetch (best effort; tolerate failure)
         shell: bash
@@ -116,7 +111,7 @@ jobs:
           set -e
 
       #################################################################
-      # CDC stroke mortality + ACS uninsured (these already work)
+      # CDC stroke mortality + ACS uninsured
       #################################################################
       - name: Run CDC county
         run: python etl/fetch_cdc_stroke_county.py
@@ -126,8 +121,6 @@ jobs:
 
       #################################################################
       # Build clean tables
-      # (Now also handles: copying hospital info, filtering stroke outcomes,
-      # and generating hospital_profile + county_profile)
       #################################################################
       - name: Build clean tables
         run: python etl/build_clean_tables.py
