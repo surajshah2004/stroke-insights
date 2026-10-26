@@ -17,20 +17,20 @@ CLEAN = ROOT / "data_clean"
 # Constants
 # -----------------------------
 CATEGORY_ORDER = [
-    "Best-Aligned Care",
-    "Low Gap",
-    "Moderate Gap",
-    "High Gap",
-    "Critical Gap",
+    "90–100th percentile",
+    "60–90th percentile",
+    "30–60th percentile",
+    "10–30th percentile",
+    "0–10th percentile",
     "No / Insufficient Data",
 ]
 
 COLOR_MAP = {
-    "Best-Aligned Care": "#1B5E20",
-    "Low Gap": "#81C784",
-    "Moderate Gap": "#FFEB3B",
-    "High Gap": "#FF8A65",
-    "Critical Gap": "#B71C1C",
+    "90–100th percentile": "#1B5E20",
+    "60–90th percentile": "#81C784",
+    "30–60th percentile": "#FFEB3B",
+    "10–30th percentile": "#FF8A65",
+    "0–10th percentile": "#B71C1C",
     "No / Insufficient Data": "#BDBDBD",
 }
 
@@ -38,18 +38,15 @@ DISPLAY_NAMES = {
     "stroke_mortality_rate": "Stroke mortality (deaths per 100,000)",
     "uninsured_rate": "Uninsured rate (%)",
     "hospitals_reporting": "Hospitals reporting",
-    "care_gap_index": "Care gap index",
-    "burden_index": "Burden index",
-    "supply_score": "Supply score",
-    "SCAI": "SCAI",
-    "access_rank": "Access rank (1 = best)",
+    "SCAI": "Stroke Care Alignment Index (SCAI)",
+    "access_rank": "SCAI rank (1 = highest)",
 }
 
 
 # -----------------------------
 # Publication link (set after acceptance)
 # -----------------------------
-PAPER_URL = None  # e.g., "https://doi.org/10.xxxx/xxxx" or the final Stroke landing page
+PAPER_URL = None  # e.g., "https://doi.org/10.xxxx/xxxx" or the final journal landing page
 
 
 # -----------------------------
@@ -111,14 +108,14 @@ def load_county_data() -> pd.DataFrame:
         if pd.notna(med_unins) and med_unins <= 1.0:
             df["uninsured_rate"] = df["uninsured_rate"] * 100.0
 
-    # Compute Burden Index if missing and ingredients exist
+    # Preserve the original underlying calculation if this input is absent
     # burden_index = log1p( stroke_mortality_rate * (uninsured_rate/100) )
     if "burden_index" not in df.columns:
         if {"stroke_mortality_rate", "uninsured_rate"} <= set(df.columns):
             prod = df["stroke_mortality_rate"] * (df["uninsured_rate"] / 100.0)
             df["burden_index"] = np.log1p(prod)
 
-    # Compute SCAI if missing: 1 - normalized care_gap_index (higher = better access)
+    # Compute SCAI if missing: 1 - normalized care_gap_index (higher = more favorable)
     if "SCAI" not in df.columns:
         if "care_gap_index" in df.columns:
             care = pd.to_numeric(df["care_gap_index"], errors="coerce")
@@ -132,10 +129,10 @@ def load_county_data() -> pd.DataFrame:
         else:
             df["SCAI"] = np.nan
 
-    # access_rank: 1 = best access (based on SCAI)
+    # access_rank: 1 = highest SCAI
     df["access_rank"] = df["SCAI"].rank(method="dense", ascending=False)
 
-    # Base SCAI category column (used for filtering + tables)
+    # Base national SCAI percentile group (used for filtering + tables)
     df["display_category"] = "No / Insufficient Data"
 
     # Treat anything containing "INSUFFICIENT" as not valid; everything else counts as valid
@@ -149,17 +146,19 @@ def load_county_data() -> pd.DataFrame:
 
     valid = df[valid_mask].copy()
     if len(valid) > 0:
-        valid["display_category"] = pd.qcut(
-            valid["SCAI"],
-            q=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        # Percentiles are assigned nationally, before sidebar filtering.
+        pct = valid["SCAI"].rank(method="average", pct=True)
+        valid["display_category"] = pd.cut(
+            pct,
+            bins=[0, 0.1, 0.3, 0.6, 0.9, 1.0],
             labels=[
-                "Critical Gap",
-                "High Gap",
-                "Moderate Gap",
-                "Low Gap",
-                "Best-Aligned Care",
+                "0–10th percentile",
+                "10–30th percentile",
+                "30–60th percentile",
+                "60–90th percentile",
+                "90–100th percentile",
             ],
-            duplicates="drop",
+            include_lowest=True,
         ).astype(str)
 
         df.loc[valid.index, "display_category"] = valid["display_category"]
@@ -167,80 +166,17 @@ def load_county_data() -> pd.DataFrame:
     return df
 
 
-def make_quintile_category(
-    df: pd.DataFrame,
-    metric_col: str,
-    higher_is_better: bool,
-    data_status_col: str = "data_status",
-) -> pd.Series:
-    """
-    Robust quintile binning using percentile rank (works even with many ties).
-    - Valid = data_status does NOT contain "INSUFFICIENT" and metric is not null
-    - Outputs CATEGORY_ORDER labels
-    - If higher_is_better=False, inverts (e.g., burden where higher = worse)
-    """
-    out = pd.Series("No / Insufficient Data", index=df.index, dtype="object")
-
-    if metric_col not in df.columns:
-        return out
-
-    status = (
-        df.get(data_status_col, "VALID")
-        .fillna("VALID")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-    is_valid = ~status.str.contains("INSUFFICIENT", na=False)
-
-    valid_mask = is_valid & df[metric_col].notna()
-    if valid_mask.sum() == 0:
-        return out
-
-    s = pd.to_numeric(df.loc[valid_mask, metric_col], errors="coerce").dropna()
-    if s.empty:
-        return out
-
-    # Percentile rank in (0, 1]; average handles ties
-    pct = s.rank(method="average", pct=True)
-
-    bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    labels_low_to_high = [
-        "Critical Gap",
-        "High Gap",
-        "Moderate Gap",
-        "Low Gap",
-        "Best-Aligned Care",
-    ]
-    cat = pd.cut(
-        pct, bins=bins, labels=labels_low_to_high, include_lowest=True, right=True
-    )
-
-    if not higher_is_better:
-        invert_map = {
-            "Critical Gap": "Best-Aligned Care",
-            "High Gap": "Low Gap",
-            "Moderate Gap": "Moderate Gap",
-            "Low Gap": "High Gap",
-            "Best-Aligned Care": "Critical Gap",
-        }
-        cat = cat.astype(str).map(invert_map)
-    else:
-        cat = cat.astype(str)
-
-    out.loc[s.index] = cat
-    return out
-
-
 # -----------------------------
 # Page config
 # -----------------------------
-st.set_page_config(page_title="Stroke Care Access Explorer", layout="wide")
-st.title("U.S. Stroke Care Access Explorer")
+st.set_page_config(page_title="Stroke Care Alignment Explorer", layout="wide")
+st.title("U.S. Stroke Care Alignment Explorer")
 
 st.caption(
-    "County-level Stroke Care Access Index (SCAI) combining stroke mortality (deaths per 100,000), "
-    "uninsured rate (percent), hospital supply, and performance."
+    "Exploratory Stroke Care Alignment Index (SCAI) combining county-level stroke mortality, "
+    "uninsured rates, CMS hospital performance, and number of reporting hospitals. "
+    "Higher SCAI values indicate a more favorable relationship among these measures; "
+    "SCAI does not directly measure access to care."
 )
 
 # -----------------------------
@@ -256,7 +192,7 @@ st.markdown(
 
 st.markdown("**Publication:**")
 if PAPER_URL:
-    st.markdown(f"- [Stroke publication link]({PAPER_URL})")
+    st.markdown(f"- [Study publication link]({PAPER_URL})")
 else:
     st.markdown("- _Link will be added upon acceptance._")
 
@@ -272,22 +208,6 @@ df = load_county_data()
 # -----------------------------
 st.sidebar.header("Filters")
 
-# Map toggle (show only options that exist)
-metric_options = [("SCAI", "SCAI")]
-if "supply_score" in df.columns:
-    metric_options.append(("Supply score", "supply_score"))
-if "burden_index" in df.columns:
-    metric_options.append(("Burden index", "burden_index"))
-
-metric_label_to_col = dict(metric_options)
-
-map_metric_label = st.sidebar.radio(
-    "Map metric",
-    options=[x[0] for x in metric_options],
-    index=0,
-    help="Switch the choropleth to show SCAI, supply score, or burden index (quintiles with the same color scheme).",
-)
-map_metric_col = metric_label_to_col[map_metric_label]
 
 # State filter
 states = sorted(df["state"].dropna().unique()) if "state" in df.columns else []
@@ -305,10 +225,10 @@ available_categories = (
     else []
 )
 category_filter = st.sidebar.multiselect(
-    "Category (SCAI-based)",
+    "SCAI percentile group",
     options=available_categories,
     default=available_categories,
-    help="Filters remain based on the original SCAI-based category, even if you toggle the map metric.",
+    help="Filter counties by their national SCAI percentile group.",
 )
 
 # Population slider
@@ -344,9 +264,9 @@ st.sidebar.write(f"Showing **{len(filtered)}** counties")
 
 
 # -----------------------------
-# Population summary by category (SCAI categories)
+# Population summary by SCAI percentile group
 # -----------------------------
-st.subheader("Population by care gap category")
+st.subheader("Population by SCAI percentile group")
 
 if {"display_category", "population"} <= set(filtered.columns) and filtered["population"].notna().any():
     pop_summary = (
@@ -389,7 +309,7 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
 
     pop_summary_display = pop_summary.rename(
         columns={
-            "display_category": "Category",
+            "display_category": "SCAI percentile group",
             "total_population": "Total population",
             "share_of_population_percent": "Share of population (%)",
             "mean_county_population": "Mean county population",
@@ -401,7 +321,7 @@ if {"display_category", "population"} <= set(filtered.columns) and filtered["pop
 
     st.dataframe(pop_summary_display, use_container_width=True, hide_index=True)
     st.caption(
-        "Categories are ordered from best to worst stroke care access (SCAI quintiles). "
+        "Groups are ordered from highest to lowest SCAI percentiles (10/20/30/30/10 grouping). "
         "Total population reflects the sum across counties in each category; "
         "mean, SD, and min/max describe the distribution of county populations within each category "
         "in the current filtered view."
@@ -411,23 +331,11 @@ else:
 
 
 # -----------------------------
-# Map categories (toggle-controlled)
+# Map categories (fixed national SCAI percentile groups)
 # -----------------------------
-higher_is_better = True
-if map_metric_col == "burden_index":
-    higher_is_better = False
-
 filtered = filtered.copy()
-filtered["map_category"] = make_quintile_category(
-    filtered,
-    metric_col=map_metric_col,
-    higher_is_better=higher_is_better,
-)
-
-filtered["map_category"] = filtered["map_category"].astype(str).str.strip()
-
 filtered["map_category"] = pd.Categorical(
-    filtered["map_category"],
+    filtered["display_category"].astype(str).str.strip(),
     categories=CATEGORY_ORDER,
     ordered=True,
 )
@@ -437,13 +345,10 @@ filtered["map_category"] = pd.Categorical(
 # Debug panel
 # -----------------------------
 with st.expander("Debug: map metric coverage"):
-    st.write("Map metric:", map_metric_label, "→", map_metric_col)
-    if map_metric_col in filtered.columns:
-        st.write("Non-null metric values:", int(filtered[map_metric_col].notna().sum()))
-        st.write("Unique metric values:", int(filtered[map_metric_col].nunique(dropna=True)))
-        st.write("Metric min / max:", filtered[map_metric_col].min(), filtered[map_metric_col].max())
-    else:
-        st.write("Metric column missing in filtered data.")
+    st.write("Metric: SCAI")
+    st.write("Non-null metric values:", int(filtered["SCAI"].notna().sum()))
+    st.write("Unique metric values:", int(filtered["SCAI"].nunique(dropna=True)))
+    st.write("Metric min / max:", filtered["SCAI"].min(), filtered["SCAI"].max())
 
     if "data_status" in filtered.columns:
         st.write("Top data_status values:")
@@ -457,22 +362,18 @@ with st.expander("Debug: map metric coverage"):
 # -----------------------------
 # Choropleth map
 # -----------------------------
-st.subheader(f"Map: {map_metric_label} (quintiles)")
+st.subheader("Map: SCAI (national percentile groups)")
 
 geojson_url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
 
 hover_data = {
-    "burden_index": ":.3f",
-    "supply_score": ":.3f",
     "SCAI": ":.3f",
     "access_rank": ":.0f",
     "stroke_mortality_rate": ":.1f",
     "uninsured_rate": ":.1f",
     "population": ":,",
     "hospitals_reporting": True,
-    "care_gap_index": ":.3f",
     "display_category": True,
-    "map_category": True,
     "data_status": True,
     "state": True,
     "county_fips": False,
@@ -488,7 +389,7 @@ fig = px.choropleth(
     scope="usa",
     hover_name="county_name" if "county_name" in filtered.columns else None,
     hover_data=hover_data,
-    labels={"map_category": "Category", "display_category": "SCAI category", **DISPLAY_NAMES},
+    labels={"map_category": "SCAI percentile group", "display_category": "SCAI percentile group", **DISPLAY_NAMES},
 )
 
 fig.update_layout(margin={"r": 0, "t": 30, "l": 0, "b": 0})
@@ -507,13 +408,9 @@ cols_to_show = [
     "SCAI",
     "access_rank",
     "display_category",
-    "map_category",
     "stroke_mortality_rate",
     "uninsured_rate",
-    "burden_index",
-    "supply_score",
     "hospitals_reporting",
-    "care_gap_index",
     "data_status",
 ]
 cols_to_show = [c for c in cols_to_show if c in filtered.columns]
@@ -523,15 +420,12 @@ table_df = filtered[cols_to_show].copy()
 rename_for_display = {
     "stroke_mortality_rate": "Stroke mortality (deaths per 100,000)",
     "uninsured_rate": "Uninsured rate (%)",
-    "access_rank": "Access rank (1 = best)",
-    "display_category": "SCAI category",
-    "map_category": "Map category",
-    "burden_index": "Burden index",
-    "supply_score": "Supply score",
+    "access_rank": "SCAI rank (1 = highest)",
+    "display_category": "SCAI percentile group",
 }
 table_df = table_df.rename(columns=rename_for_display)
 
-sort_col = "Access rank (1 = best)" if "Access rank (1 = best)" in table_df.columns else None
+sort_col = "SCAI rank (1 = highest)" if "SCAI rank (1 = highest)" in table_df.columns else None
 if sort_col:
     table_df = table_df.sort_values(sort_col, ascending=True)
 
